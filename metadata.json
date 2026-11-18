@@ -1,0 +1,6 @@
+{
+  "name": "Hello Sir",
+  "description": "Secure real-time messaging, WebRTC audio/video calling, and live location sharing app.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

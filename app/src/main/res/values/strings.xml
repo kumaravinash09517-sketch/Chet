@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Hello Sir</string>
+    <string name="blocked_title">Access Restricted</string>
+    <string name="blocked_message">You are blocked by the administrator.</string>
+    <string name="server_waking">Connecting to secure server…</string>
+    <string name="channel_calls_name">Incoming Calls</string>
+    <string name="channel_messages_name">Messages</string>
+    <string name="channel_sync_name">Background Connection</string>
+    <string name="contact_rationale_title">Contact Access for In-App Picker</string>
+    <string name="contact_rationale_body">Hello Sir uses your contacts only when you open the in-app contact picker so you can select someone to share or find on the user directory.</string>
+    <string name="location_rationale_title">Location Access</string>
+    <string name="location_rationale_body">Allow location access to share your current or live GPS coordinates inside chats.</string>
+    <string name="call_permissions_title">Microphone &amp; Camera Access</string>
+    <string name="call_permissions_body">Allow microphone and camera permissions for encrypted WebRTC voice and video calls.</string>
+</resources>
