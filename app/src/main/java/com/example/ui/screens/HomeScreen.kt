@@ -62,12 +62,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -79,14 +79,10 @@ import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageStatus
 import com.example.data.local.UserEntity
-import com.example.data.remote.RetrofitClient
 import com.example.platform.DeviceContact
 import com.example.ui.theme.OnlineGreen
 import com.example.ui.theme.ReadCheckEmerald
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -120,7 +116,6 @@ fun HomeScreen(
     var showContactSheet by remember { mutableStateOf(false) }
     var showContactRationale by remember { mutableStateOf(false) }
 
-    val coroutineScope = rememberCoroutineScope()
     var foundRemoteUser by remember { mutableStateOf<FoundPhoneUser?>(null) }
     var searchingByPhone by remember { mutableStateOf(false) }
     var phoneSearchNotFound by remember { mutableStateOf(false) }
@@ -143,7 +138,7 @@ fun HomeScreen(
         }
     }
 
-    val filteredUsers = remember(directoryUsers, searchQuery, session.userId) {
+    val filteredUsers = remember(directoryUsers, searchQuery) {
         val othersFirst = directoryUsers.sortedByDescending { it.lastLoginMillis }
         if (searchQuery.isBlank()) othersFirst
         else othersFirst.filter {
@@ -152,44 +147,28 @@ fun HomeScreen(
         }
     }
 
-    // फोन नंबर डालते ही सर्वर से यूजर ढूँढना
-    LaunchedEffect(searchQuery) {
+    // फोन नंबर डालते ही डायरेक्टरी/कॉन्टैक्ट्स से यूजर ढूँढना
+    LaunchedEffect(searchQuery, directoryUsers) {
         val digitsOnly = searchQuery.filter { it.isDigit() }
         foundRemoteUser = null
         phoneSearchNotFound = false
         if (digitsOnly.length >= 6) {
             searchingByPhone = true
-            delay(350)
-            try {
-                val res = withContext(Dispatchers.IO) {
-                    RetrofitClient.api.findUser(phone = digitsOnly)
-                }
-                if (res.isSuccessful) {
-                    val body = res.body()
-                    val found = body?.get("found") == true || body?.get("user_id") != null
-                    if (found) {
-                        val userMap = (body?.get("user") as? Map<*, *>) ?: body
-                        val uid = userMap?.get("user_id")?.toString()
-                            ?: userMap?.get("id")?.toString()
-                            ?: digitsOnly
-                        val uname = userMap?.get("name")?.toString()
-                            ?: userMap?.get("display_name")?.toString()
-                            ?: "User ($digitsOnly)"
-                        val uphone = userMap?.get("phone")?.toString() ?: digitsOnly
-                        foundRemoteUser = FoundPhoneUser(
-                            userId = uid,
-                            displayName = uname,
-                            phone = uphone
-                        )
-                    } else {
-                        phoneSearchNotFound = true
-                    }
-                }
-            } catch (_: Exception) {
-                // नेटवर्क त्रुटि होने पर क्रैश नहीं होगा
-            } finally {
-                searchingByPhone = false
+            delay(250)
+            val matchedDirectoryUser = directoryUsers.firstOrNull { user ->
+                user.userId.filter { it.isDigit() }.contains(digitsOnly) ||
+                    user.userId.contains(digitsOnly, ignoreCase = true)
             }
+            if (matchedDirectoryUser != null) {
+                foundRemoteUser = FoundPhoneUser(
+                    userId = matchedDirectoryUser.userId,
+                    displayName = matchedDirectoryUser.displayName,
+                    phone = digitsOnly
+                )
+            } else if (digitsOnly.length >= 10) {
+                phoneSearchNotFound = true
+            }
+            searchingByPhone = false
         } else {
             searchingByPhone = false
         }
@@ -353,7 +332,6 @@ fun HomeScreen(
                     .testTag("home_search_input")
             )
 
-            // फोन नंबर सर्च रिजल्ट कार्ड (यदि मिला हो तो सीधे ID खोलने के लिए)
             if (searchingByPhone) {
                 Row(
                     modifier = Modifier
@@ -835,7 +813,7 @@ private fun EmptyHomeState(title: String, subtitle: String) {
 }
 
 @Composable
-fun MessageStatusIcon(status: MessageStatus, tintOverride: androidx.compose.ui.graphics.Color? = null) {
+fun MessageStatusIcon(status: MessageStatus, tintOverride: Color? = null) {
     when (status) {
         MessageStatus.PENDING -> Icon(
             imageVector = Icons.Rounded.Schedule,
