@@ -25,7 +25,7 @@ class Converters {
 
 @Database(
     entities = [UserEntity::class, ConversationEntity::class, MessageEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)

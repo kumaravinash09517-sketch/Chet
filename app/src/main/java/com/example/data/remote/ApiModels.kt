@@ -4,10 +4,43 @@ import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
 @JsonClass(generateAdapter = true)
+data class SendOtpRequest(
+    @Json(name = "phone") val phone: String,
+    @Json(name = "device_id") val deviceId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class SendOtpResponse(
+    @Json(name = "success") val success: Boolean = true,
+    @Json(name = "message") val message: String? = null,
+    @Json(name = "expiresInSeconds") val expiresInSeconds: Int = 60
+)
+
+@JsonClass(generateAdapter = true)
+data class VerifyOtpRequest(
+    @Json(name = "phone") val phone: String,
+    @Json(name = "otp") val otp: String,
+    @Json(name = "device_id") val deviceId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class VerifyOtpResponse(
+    @Json(name = "success") val success: Boolean = true,
+    @Json(name = "token") val token: String? = null,
+    @Json(name = "userId") val userId: String? = null,
+    @Json(name = "displayName") val displayName: String? = null,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "message") val message: String? = null
+)
+
+@JsonClass(generateAdapter = true)
 data class RegisterUserRequest(
     @Json(name = "userId") val userId: String,
     @Json(name = "displayName") val displayName: String,
+    @Json(name = "phone") val phone: String = "",
+    @Json(name = "device_id") val deviceId: String,
     @Json(name = "deviceLockId") val deviceLockId: String,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "loginTimestamp") val loginTimestamp: Long,
     @Json(name = "loginDateFormatted") val loginDateFormatted: String
 )
@@ -24,6 +57,8 @@ data class RegisterUserResponse(
 data class RemoteUserDto(
     @Json(name = "userId") val userId: String,
     @Json(name = "displayName") val displayName: String,
+    @Json(name = "phone") val phone: String = "",
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "lastLoginMillis") val lastLoginMillis: Long = System.currentTimeMillis(),
     @Json(name = "lastLoginFormatted") val lastLoginFormatted: String = "",
     @Json(name = "isOnline") val isOnline: Boolean = false,

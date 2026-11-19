@@ -22,6 +22,8 @@ private val Context.secureSessionDataStore: DataStore<Preferences> by preference
 data class UserSession(
     val userId: String,
     val displayName: String,
+    val phone: String = "",
+    val avatarUrl: String? = null,
     val sessionToken: String,
     val deviceLockId: String,
     val registeredAtMillis: Long,
@@ -81,26 +83,35 @@ class SessionManager(private val context: Context) {
     }
 
     /**
-     * Checks whether this device is already locked to a different User ID.
+     * Checks whether this device is already locked to a different User ID or Phone Number.
      */
-    suspend fun canRegisterUser(candidateUserId: String): Boolean {
+    suspend fun canRegisterUser(candidateUserId: String, candidatePhone: String = ""): Boolean {
         val existing = getCurrentSession() ?: return true
-        return existing.userId.equals(candidateUserId.trim(), ignoreCase = true)
+        val sameId = existing.userId.equals(candidateUserId.trim(), ignoreCase = true)
+        val samePhone = candidatePhone.isNotBlank() &&
+            existing.phone.filter { it.isDigit() } == candidatePhone.filter { it.isDigit() }
+        return sameId || samePhone
     }
 
     suspend fun saveSession(
         userId: String,
         displayName: String,
+        phone: String,
+        avatarUrl: String?,
         serverToken: String?,
         registeredAtMillis: Long,
-        registeredAtFormatted: String
+        registeredAtFormatted: String,
+        deviceIdOverride: String? = null
     ): UserSession {
         val deviceLockId = getOrCreateDeviceLockId()
+        val effectiveDeviceId = deviceIdOverride?.takeIf { it == deviceLockId } ?: deviceLockId
         val session = UserSession(
             userId = userId.trim(),
             displayName = displayName.trim(),
+            phone = phone.trim(),
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
             sessionToken = serverToken?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
-            deviceLockId = deviceLockId,
+            deviceLockId = effectiveDeviceId,
             registeredAtMillis = registeredAtMillis,
             registeredAtFormatted = registeredAtFormatted
         )

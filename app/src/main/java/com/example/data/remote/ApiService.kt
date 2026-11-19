@@ -17,30 +17,20 @@ interface ApiService {
     @GET("api/health")
     suspend fun pingHealth(): Response<BasicSuccessResponse>
 
-    // 🔐 फोन नंबर पर OTP भेजने के लिए
     @POST("api/auth/send-otp")
-    suspend fun sendOtp(@Body request: Map<String, String>): Response>
+    suspend fun sendOtp(@Body request: SendOtpRequest): Response<SendOtpResponse>
 
-    // ✅ OTP वेरिफाई करके लॉगिन/रजिस्ट्रेशन पूरा करने के लिए (नाम अनिवार्य, फोटो वैकल्पिक)
     @POST("api/auth/verify-otp")
-    suspend fun verifyOtp(@Body request: Map<String, String>): Response>
-
-    // 🖼️ प्रोफाइल नाम या फोटो (बाद में भी) अपडेट करने के लिए
-    @POST("api/users/profile")
-    suspend fun updateProfile(@Body request: Map<String, String>): Response>
-
-    // 🔍 फोन नंबर या user_id से सीधे यूजर ढूँढने के लिए
-    @GET("api/users/find")
-    suspend fun findUser(
-        @Query("phone") phone: String? = null,
-        @Query("user_id") userId: String? = null
-    ): Response>
+    suspend fun verifyOtp(@Body request: VerifyOtpRequest): Response<VerifyOtpResponse>
 
     @POST("api/users/register")
     suspend fun registerUser(@Body request: RegisterUserRequest): Response<RegisterUserResponse>
 
     @GET("api/users")
     suspend fun getUserDirectory(): Response<UserDirectoryResponse>
+
+    @GET("api/users/search")
+    suspend fun searchUsers(@Query("q") query: String): Response<UserDirectoryResponse>
 
     @POST("api/webhooks/admin-event")
     suspend fun sendAdminWebhook(@Body request: AdminWebhookEventRequest): Response<BasicSuccessResponse>

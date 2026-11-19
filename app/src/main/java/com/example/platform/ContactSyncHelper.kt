@@ -59,7 +59,9 @@ class ContactSyncHelper(private val context: Context) {
                     if (name.isNotBlank() && phone.isNotBlank() && !contactsMap.containsKey(id)) {
                         val normalizedPhone = phone.filter { it.isDigit() }
                         val match = directoryUsers.firstOrNull { dirUser ->
-                            dirUser.displayName.equals(name, ignoreCase = true) ||
+                            val dirPhone = dirUser.phone.filter { it.isDigit() }
+                            (normalizedPhone.length >= 6 && dirPhone.endsWith(normalizedPhone.takeLast(6))) ||
+                                dirUser.displayName.equals(name, ignoreCase = true) ||
                                 (normalizedPhone.length >= 6 &&
                                     dirUser.userId.filter { it.isDigit() }.endsWith(normalizedPhone.takeLast(6)))
                         }

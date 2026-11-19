@@ -23,21 +23,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Chat
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Group
-import androidx.compose.material.icons.rounded.PersonSearch
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -57,7 +53,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,12 +62,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.core.security.ServerStatus
 import com.example.core.security.UserSession
@@ -82,16 +78,9 @@ import com.example.data.local.UserEntity
 import com.example.platform.DeviceContact
 import com.example.ui.theme.OnlineGreen
 import com.example.ui.theme.ReadCheckEmerald
-import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private data class FoundPhoneUser(
-    val userId: String,
-    val displayName: String,
-    val phone: String
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,6 +88,7 @@ fun HomeScreen(
     session: UserSession,
     conversations: List<ConversationEntity>,
     directoryUsers: List<UserEntity>,
+    remoteSearchResults: List<UserEntity>,
     pickerContacts: List<DeviceContact>,
     totalUnreadCount: Int,
     searchQuery: String,
@@ -116,10 +106,6 @@ fun HomeScreen(
     var showContactSheet by remember { mutableStateOf(false) }
     var showContactRationale by remember { mutableStateOf(false) }
 
-    var foundRemoteUser by remember { mutableStateOf<FoundPhoneUser?>(null) }
-    var searchingByPhone by remember { mutableStateOf(false) }
-    var phoneSearchNotFound by remember { mutableStateOf(false) }
-
     val contactPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -133,44 +119,29 @@ fun HomeScreen(
         if (searchQuery.isBlank()) conversations
         else conversations.filter {
             it.peerName.contains(searchQuery, ignoreCase = true) ||
+                it.peerPhone.contains(searchQuery, ignoreCase = true) ||
                 it.peerId.contains(searchQuery, ignoreCase = true) ||
                 it.lastMessagePreview.contains(searchQuery, ignoreCase = true)
         }
     }
 
-    val filteredUsers = remember(directoryUsers, searchQuery) {
-        val othersFirst = directoryUsers.sortedByDescending { it.lastLoginMillis }
-        if (searchQuery.isBlank()) othersFirst
-        else othersFirst.filter {
+    val filteredUsers = remember(directoryUsers, remoteSearchResults, searchQuery) {
+        val merged = (directoryUsers + remoteSearchResults)
+            .distinctBy { it.userId }
+            .sortedByDescending { it.lastLoginMillis }
+        if (searchQuery.isBlank()) merged
+        else merged.filter {
             it.displayName.contains(searchQuery, ignoreCase = true) ||
+                it.phone.contains(searchQuery, ignoreCase = true) ||
                 it.userId.contains(searchQuery, ignoreCase = true)
         }
     }
 
-    // फोन नंबर डालते ही डायरेक्टरी/कॉन्टैक्ट्स से यूजर ढूँढना
-    LaunchedEffect(searchQuery, directoryUsers) {
-        val digitsOnly = searchQuery.filter { it.isDigit() }
-        foundRemoteUser = null
-        phoneSearchNotFound = false
-        if (digitsOnly.length >= 6) {
-            searchingByPhone = true
-            delay(250)
-            val matchedDirectoryUser = directoryUsers.firstOrNull { user ->
-                user.userId.filter { it.isDigit() }.contains(digitsOnly) ||
-                    user.userId.contains(digitsOnly, ignoreCase = true)
-            }
-            if (matchedDirectoryUser != null) {
-                foundRemoteUser = FoundPhoneUser(
-                    userId = matchedDirectoryUser.userId,
-                    displayName = matchedDirectoryUser.displayName,
-                    phone = digitsOnly
-                )
-            } else if (digitsOnly.length >= 10) {
-                phoneSearchNotFound = true
-            }
-            searchingByPhone = false
-        } else {
-            searchingByPhone = false
+    val peopleSearchMatches = remember(filteredUsers, filteredConversations, searchQuery, session.userId) {
+        if (searchQuery.isBlank()) emptyList()
+        else {
+            val existingPeerIds = filteredConversations.map { it.peerId }.toSet()
+            filteredUsers.filter { it.userId != session.userId && it.userId !in existingPeerIds }
         }
     }
 
@@ -209,6 +180,7 @@ fun HomeScreen(
                             contentDescription = "Sync Directory"
                         )
                     }
+                    // Hidden settings trigger: tapping user's profile avatar opens ProfileSettingsScreen
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primaryContainer,
@@ -223,19 +195,11 @@ fun HomeScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = session.displayName.take(1).uppercase(),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onPrimary
-                                )
-                            }
+                            UserAvatarCircle(
+                                name = session.displayName,
+                                avatarUrl = session.avatarUrl,
+                                sizeDp = 28
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = session.displayName.substringBefore(" "),
@@ -316,13 +280,17 @@ fun HomeScreen(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
                 placeholder = {
-                    Text(
-                        if (selectedTab == 0) "Search chats or phone number…"
-                        else "Search users or phone number…"
-                    )
+                    Text("Search by phone number, name, or ID…")
                 },
                 leadingIcon = {
                     Icon(Icons.Rounded.Search, contentDescription = "Search")
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { onSearchQueryChange("") }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                        }
+                    }
                 },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
@@ -332,77 +300,15 @@ fun HomeScreen(
                     .testTag("home_search_input")
             )
 
-            if (searchingByPhone) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text("फोन नंबर से आईडी खोज रहे हैं…", style = MaterialTheme.typography.bodySmall)
-                }
-            } else if (foundRemoteUser != null) {
-                val target = foundRemoteUser!!
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                        .clickable { onOpenChat(target.userId, target.displayName) }
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.PersonSearch,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = target.displayName,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Phone: ${target.phone} • ID: ${target.userId}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                        Button(onClick = { onOpenChat(target.userId, target.displayName) }) {
-                            Text("Chat")
-                        }
-                    }
-                }
-            } else if (phoneSearchNotFound && searchQuery.filter { it.isDigit() }.length >= 10) {
-                Text(
-                    text = "इस नंबर से कोई आईडी नहीं मिली।",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-                )
-            }
-
             if (selectedTab == 0) {
-                if (filteredConversations.isEmpty()) {
+                if (filteredConversations.isEmpty() && peopleSearchMatches.isEmpty()) {
                     EmptyHomeState(
-                        title = "No conversations yet",
-                        subtitle = "Open the Directory tab, search a phone number, or tap the Contact Picker button to start chatting."
+                        title = if (searchQuery.isBlank()) "No conversations yet" else "No matching chats or users",
+                        subtitle = if (searchQuery.isBlank()) {
+                            "Search by phone number or name above, open Directory, or tap the Contact Picker."
+                        } else {
+                            "Try another phone number, name, or user ID."
+                        }
                     )
                 } else {
                     LazyColumn(
@@ -411,7 +317,7 @@ fun HomeScreen(
                     ) {
                         items(
                             items = filteredConversations,
-                            key = { it.peerId }
+                            key = { "conv_${it.peerId}" }
                         ) { conv ->
                             ConversationRow(
                                 conversation = conv,
@@ -422,13 +328,38 @@ fun HomeScreen(
                                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
                             )
                         }
+
+                        if (peopleSearchMatches.isNotEmpty()) {
+                            item(key = "people_results_header") {
+                                Text(
+                                    text = "People Found",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                                )
+                            }
+                            items(
+                                items = peopleSearchMatches,
+                                key = { "search_${it.userId}" }
+                            ) { user ->
+                                RegisteredUserRow(
+                                    user = user,
+                                    isSelf = false,
+                                    onClick = { onOpenChat(user.userId, user.displayName) }
+                                )
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 76.dp, end = 16.dp),
+                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                                )
+                            }
+                        }
                     }
                 }
             } else {
                 if (filteredUsers.isEmpty()) {
                     EmptyHomeState(
                         title = "Directory empty",
-                        subtitle = "Pull or tap Refresh to sync registered users from https://rendar-ud3i.onrender.com."
+                        subtitle = "Tap Refresh or search by phone number to sync registered users."
                     )
                 } else {
                     LazyColumn(
@@ -493,13 +424,38 @@ fun HomeScreen(
                     val target = contact.matchedDirectoryUser
                     if (target != null) {
                         onOpenChat(target.userId, target.displayName)
-                    } else {
-                        val digits = contact.phoneNumber.filter { it.isDigit() }
-                        if (digits.isNotEmpty()) {
-                            onOpenChat(digits, contact.name)
-                        }
                     }
                 }
+            )
+        }
+    }
+}
+
+@Composable
+fun UserAvatarCircle(
+    name: String,
+    avatarUrl: String?,
+    sizeDp: Int
+) {
+    Box(
+        modifier = Modifier
+            .size(sizeDp.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        if (!avatarUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = avatarUrl,
+                contentDescription = name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(
+                text = name.take(1).uppercase().ifBlank { "?" },
+                style = if (sizeDp >= 48) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary
             )
         }
     }
@@ -518,19 +474,11 @@ private fun ConversationRow(
             .testTag("chat_row_${conversation.peerId}"),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(50.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primaryContainer),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = conversation.peerName.take(1).uppercase(),
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
+        UserAvatarCircle(
+            name = conversation.peerName,
+            avatarUrl = conversation.peerAvatarUrl,
+            sizeDp = 50
+        )
 
         Spacer(modifier = Modifier.width(12.dp))
 
@@ -627,19 +575,11 @@ private fun RegisteredUserRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(modifier = Modifier.size(50.dp)) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = user.displayName.take(1).uppercase(),
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
+            UserAvatarCircle(
+                name = user.displayName,
+                avatarUrl = user.avatarUrl,
+                sizeDp = 50
+            )
             if (user.isOnline) {
                 Box(
                     modifier = Modifier
@@ -667,7 +607,7 @@ private fun RegisteredUserRow(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "@${user.userId}",
+                    text = user.phone.ifBlank { "@${user.userId}" },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -813,7 +753,7 @@ private fun EmptyHomeState(title: String, subtitle: String) {
 }
 
 @Composable
-fun MessageStatusIcon(status: MessageStatus, tintOverride: Color? = null) {
+fun MessageStatusIcon(status: MessageStatus, tintOverride: androidx.compose.ui.graphics.Color? = null) {
     when (status) {
         MessageStatus.PENDING -> Icon(
             imageVector = Icons.Rounded.Schedule,

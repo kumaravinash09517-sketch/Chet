@@ -14,6 +14,15 @@ interface UserDao {
     @Query("SELECT * FROM users WHERE userId = :userId LIMIT 1")
     suspend fun getUser(userId: String): UserEntity?
 
+    @Query(
+        "SELECT * FROM users " +
+            "WHERE displayName LIKE '%' || :query || '%' " +
+            "OR phone LIKE '%' || :query || '%' " +
+            "OR userId LIKE '%' || :query || '%' " +
+            "ORDER BY lastLoginMillis DESC"
+    )
+    suspend fun searchUsers(query: String): List<UserEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertUsers(users: List<UserEntity>)
 

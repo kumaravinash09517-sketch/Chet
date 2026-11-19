@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.HelloSirApplication
@@ -11,11 +12,14 @@ import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.UserEntity
 import com.example.platform.DeviceContact
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 sealed interface AuthUiState {
@@ -23,6 +27,28 @@ sealed interface AuthUiState {
     data object Unauthenticated : AuthUiState
     data class Authenticated(val session: UserSession) : AuthUiState
 }
+
+enum class OtpLoginStep {
+    PHONE_ENTRY,
+    OTP_VERIFICATION,
+    PROFILE_SETUP
+}
+
+data class LoginFlowState(
+    val step: OtpLoginStep = OtpLoginStep.PHONE_ENTRY,
+    val phone: String = "",
+    val deviceId: String = "",
+    val verifiedUserId: String = "",
+    val verifiedToken: String? = null,
+    val prefilledName: String = "",
+    val avatarUrl: String? = null,
+    val localAvatarPreviewUri: String? = null,
+    val isAvatarUploading: Boolean = false,
+    val resendCountdownSeconds: Int = 0,
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+    val infoMessage: String? = null
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -49,11 +75,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val serverStatus: StateFlow<ServerStatus> = GlobalSecurityEventBus.serverStatus
     val wsConnected: StateFlow<Boolean> = app.signalingClient.isConnected
 
-    private val _loginLoading = MutableStateFlow(false)
-    val loginLoading: StateFlow<Boolean> = _loginLoading.asStateFlow()
-
-    private val _loginError = MutableStateFlow<String?>(null)
-    val loginError: StateFlow<String?> = _loginError.asStateFlow()
+    private val _loginFlowState = MutableStateFlow(LoginFlowState())
+    val loginFlowState: StateFlow<LoginFlowState> = _loginFlowState.asStateFlow()
 
     private val _directorySyncing = MutableStateFlow(false)
     val directorySyncing: StateFlow<Boolean> = _directorySyncing.asStateFlow()
@@ -64,8 +87,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
+    private val _remoteSearchResults = MutableStateFlow<List<UserEntity>>(emptyList())
+    val remoteSearchResults: StateFlow<List<UserEntity>> = _remoteSearchResults.asStateFlow()
+
+    private var countdownJob: Job? = null
+    private var searchJob: Job? = null
+
     init {
         viewModelScope.launch {
+            val deviceId = repository.getDeviceLockId()
+            _loginFlowState.update { it.copy(deviceId = deviceId) }
             repository.warmUpServer()
         }
         viewModelScope.launch {
@@ -82,16 +113,125 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
+        searchJob?.cancel()
+        if (query.trim().length < 2) {
+            _remoteSearchResults.value = emptyList()
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(300L)
+            _remoteSearchResults.value = repository.searchUsers(query)
+        }
     }
 
-    fun registerAndLogin(userId: String, displayName: String) {
-        registerAndLogin(
-            userId = userId,
-            displayName = displayName,
-            phone = "",
-            deviceId = "",
-            avatarUrl = ""
-        )
+    fun sendOtp(phone: String) {
+        val cleanPhone = phone.trim()
+        viewModelScope.launch {
+            val deviceId = _loginFlowState.value.deviceId.ifBlank { repository.getDeviceLockId() }
+            _loginFlowState.update {
+                it.copy(
+                    phone = cleanPhone,
+                    deviceId = deviceId,
+                    isLoading = true,
+                    errorMessage = null,
+                    infoMessage = null
+                )
+            }
+            val result = repository.sendOtp(cleanPhone)
+            result.onSuccess { resp ->
+                _loginFlowState.update {
+                    it.copy(
+                        step = OtpLoginStep.OTP_VERIFICATION,
+                        isLoading = false,
+                        infoMessage = resp.message ?: "Verification code sent to $cleanPhone"
+                    )
+                }
+                startOtpCountdown(resp.expiresInSeconds.coerceIn(30, 120))
+            }.onFailure { err ->
+                _loginFlowState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = err.message ?: "Failed to send OTP."
+                    )
+                }
+            }
+        }
+    }
+
+    fun verifyOtp(otp: String) {
+        val phone = _loginFlowState.value.phone
+        viewModelScope.launch {
+            _loginFlowState.update { it.copy(isLoading = true, errorMessage = null) }
+            val result = repository.verifyOtp(phone, otp)
+            result.onSuccess { resp ->
+                countdownJob?.cancel()
+                val derivedId = resp.userId?.takeIf { it.isNotBlank() }
+                    ?: ("u_" + phone.filter { it.isDigit() }.ifBlank { phone })
+                _loginFlowState.update {
+                    it.copy(
+                        step = OtpLoginStep.PROFILE_SETUP,
+                        verifiedUserId = derivedId,
+                        verifiedToken = resp.token,
+                        prefilledName = resp.displayName.orEmpty(),
+                        avatarUrl = resp.avatarUrl,
+                        isLoading = false,
+                        errorMessage = null,
+                        infoMessage = "Phone verified. Complete your profile."
+                    )
+                }
+            }.onFailure { err ->
+                _loginFlowState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = err.message ?: "Invalid OTP code."
+                    )
+                }
+            }
+        }
+    }
+
+    fun resetLoginToPhoneStep() {
+        countdownJob?.cancel()
+        _loginFlowState.update {
+            it.copy(
+                step = OtpLoginStep.PHONE_ENTRY,
+                resendCountdownSeconds = 0,
+                errorMessage = null,
+                infoMessage = null
+            )
+        }
+    }
+
+    fun uploadProfilePhoto(uri: Uri) {
+        val hint = _loginFlowState.value.verifiedUserId.ifBlank { _loginFlowState.value.phone }
+        viewModelScope.launch {
+            _loginFlowState.update {
+                it.copy(
+                    localAvatarPreviewUri = uri.toString(),
+                    isAvatarUploading = true,
+                    errorMessage = null
+                )
+            }
+            val result = repository.uploadAvatarPhoto(uri, hint)
+            result.onSuccess { url ->
+                _loginFlowState.update {
+                    it.copy(avatarUrl = url, isAvatarUploading = false)
+                }
+            }.onFailure { err ->
+                _loginFlowState.update {
+                    it.copy(
+                        isAvatarUploading = false,
+                        errorMessage = err.message ?: "Photo upload failed; you can skip for now."
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearProfilePhoto() {
+        _loginFlowState.update {
+            it.copy(avatarUrl = null, localAvatarPreviewUri = null, isAvatarUploading = false)
+        }
     }
 
     fun registerAndLogin(
@@ -99,21 +239,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         displayName: String,
         phone: String,
         deviceId: String,
-        avatarUrl: String
+        avatarUrl: String?
     ) {
         viewModelScope.launch {
-            _loginError.value = null
-            _loginLoading.value = true
-            val result = repository.registerOrLogin(userId, displayName)
-            _loginLoading.value = false
-            result.onFailure { err ->
-                _loginError.value = err.message ?: "Unable to register on server."
+            _loginFlowState.update { it.copy(isLoading = true, errorMessage = null) }
+            val result = repository.registerOrLogin(
+                userId = userId,
+                displayName = displayName,
+                phone = phone,
+                deviceId = deviceId,
+                avatarUrl = avatarUrl,
+                verifiedToken = _loginFlowState.value.verifiedToken
+            )
+            result.onSuccess {
+                _loginFlowState.value = LoginFlowState(deviceId = deviceId)
+            }.onFailure { err ->
+                _loginFlowState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = err.message ?: "Unable to complete registration."
+                    )
+                }
             }
         }
     }
 
     fun clearLoginError() {
-        _loginError.value = null
+        _loginFlowState.update { it.copy(errorMessage = null) }
+    }
+
+    private fun startOtpCountdown(seconds: Int) {
+        countdownJob?.cancel()
+        countdownJob = viewModelScope.launch {
+            var remaining = seconds
+            while (remaining >= 0) {
+                _loginFlowState.update { it.copy(resendCountdownSeconds = remaining) }
+                if (remaining == 0) break
+                delay(1000L)
+                remaining--
+            }
+        }
     }
 
     fun refreshDirectory() {
@@ -148,6 +313,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             app.stopBackgroundSignalingService()
             repository.logout()
+            val deviceId = repository.getDeviceLockId()
+            _loginFlowState.value = LoginFlowState(deviceId = deviceId)
         }
     }
 }

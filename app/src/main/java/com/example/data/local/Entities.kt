@@ -26,6 +26,8 @@ enum class MessageStatus {
 data class UserEntity(
     @PrimaryKey val userId: String,
     val displayName: String,
+    val phone: String = "",
+    val avatarUrl: String? = null,
     val lastLoginMillis: Long,
     val lastLoginFormatted: String,
     val isOnline: Boolean = false,
@@ -39,6 +41,8 @@ data class UserEntity(
 data class ConversationEntity(
     @PrimaryKey val peerId: String,
     val peerName: String,
+    val peerPhone: String = "",
+    val peerAvatarUrl: String? = null,
     val lastMessageId: String? = null,
     val lastMessagePreview: String = "",
     val lastMessageType: MessageType = MessageType.TEXT,

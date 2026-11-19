@@ -130,13 +130,13 @@ private fun HelloSirRoot(
     val conversations by mainViewModel.conversations.collectAsStateWithLifecycle()
     val directoryUsers by mainViewModel.directoryUsers.collectAsStateWithLifecycle()
     val pickerContacts by mainViewModel.pickerContacts.collectAsStateWithLifecycle()
+    val remoteSearchResults by mainViewModel.remoteSearchResults.collectAsStateWithLifecycle()
     val totalUnread by mainViewModel.totalUnreadCount.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
     val isSyncing by mainViewModel.directorySyncing.collectAsStateWithLifecycle()
     val serverStatus by mainViewModel.serverStatus.collectAsStateWithLifecycle()
     val wsConnected by mainViewModel.wsConnected.collectAsStateWithLifecycle()
-    val loginLoading by mainViewModel.loginLoading.collectAsStateWithLifecycle()
-    val loginError by mainViewModel.loginError.collectAsStateWithLifecycle()
+    val loginFlowState by mainViewModel.loginFlowState.collectAsStateWithLifecycle()
     val isBlocked by mainViewModel.isBlockedByAdmin.collectAsStateWithLifecycle()
     val callState by callViewModel.callState.collectAsStateWithLifecycle()
 
@@ -191,11 +191,15 @@ private fun HelloSirRoot(
                     }
                 }
                 LoginScreen(
-                    isLoading = loginLoading,
-                    errorMessage = loginError,
+                    flowState = loginFlowState,
                     serverStatus = serverStatus,
-                    onSubmit = { id, name, phone, deviceId, avatarUrl ->
-                        mainViewModel.registerAndLogin(id, name, phone, deviceId, avatarUrl)
+                    onSendOtp = { phone -> mainViewModel.sendOtp(phone) },
+                    onVerifyOtp = { otp -> mainViewModel.verifyOtp(otp) },
+                    onChangePhone = { mainViewModel.resetLoginToPhoneStep() },
+                    onPickAvatarPhoto = { uri -> mainViewModel.uploadProfilePhoto(uri) },
+                    onSkipAvatarPhoto = { mainViewModel.clearProfilePhoto() },
+                    onCompleteRegistration = { userId, displayName, phone, deviceId, avatarUrl ->
+                        mainViewModel.registerAndLogin(userId, displayName, phone, deviceId, avatarUrl)
                     },
                     onClearError = { mainViewModel.clearLoginError() }
                 )
@@ -214,6 +218,7 @@ private fun HelloSirRoot(
                         session = activeSession,
                         conversations = conversations,
                         directoryUsers = directoryUsers,
+                        remoteSearchResults = remoteSearchResults,
                         pickerContacts = pickerContacts,
                         totalUnreadCount = totalUnread ?: 0,
                         searchQuery = searchQuery,

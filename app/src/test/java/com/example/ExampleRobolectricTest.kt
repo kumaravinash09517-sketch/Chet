@@ -65,6 +65,44 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `searchUsers finds user by phone number or display name`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val userDao = db.userDao()
+            userDao.upsertUsers(
+                listOf(
+                    com.example.data.local.UserEntity(
+                        userId = "u_9876543210",
+                        displayName = "Avinash Kumar",
+                        phone = "+919876543210",
+                        lastLoginMillis = 2000L,
+                        lastLoginFormatted = "19 Nov 2026, 06:50 AM"
+                    ),
+                    com.example.data.local.UserEntity(
+                        userId = "u_1122334455",
+                        displayName = "Riya Sharma",
+                        phone = "+911122334455",
+                        lastLoginMillis = 1000L,
+                        lastLoginFormatted = "19 Nov 2026, 06:40 AM"
+                    )
+                )
+            )
+            val byPhone = userDao.searchUsers("987654")
+            assertEquals(1, byPhone.size)
+            assertEquals("Avinash Kumar", byPhone.first().displayName)
+
+            val byName = userDao.searchUsers("Riya")
+            assertEquals(1, byName.size)
+            assertEquals("u_1122334455", byName.first().userId)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun `403 blocklist event sets blocked state`() {
         GlobalSecurityEventBus.clearBlocked()
         GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")

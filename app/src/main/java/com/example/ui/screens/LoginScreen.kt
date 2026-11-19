@@ -1,12 +1,14 @@
 package com.example.ui.screens
 
 import android.net.Uri
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,16 +26,18 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.AddAPhoto
+import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Phone
-import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Pin
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material.icons.rounded.Sms
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,133 +51,72 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.core.security.ServerStatus
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.example.ui.viewmodel.LoginFlowState
+import com.example.ui.viewmodel.OtpLoginStep
 
 @Composable
 fun LoginScreen(
-    isLoading: Boolean,
-    errorMessage: String?,
+    flowState: LoginFlowState,
     serverStatus: ServerStatus,
-    onSubmit: (userId: String, displayName: String, phone: String, deviceId: String, avatarUrl: String?) -> Unit,
+    onSendOtp: (phone: String) -> Unit,
+    onVerifyOtp: (otp: String) -> Unit,
+    onChangePhone: () -> Unit,
+    onPickAvatarPhoto: (Uri) -> Unit,
+    onSkipAvatarPhoto: () -> Unit,
+    onCompleteRegistration: (
+        userId: String,
+        displayName: String,
+        phone: String,
+        deviceId: String,
+        avatarUrl: String?
+    ) -> Unit,
     onClearError: () -> Unit
 ) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
+    var phoneInput by rememberSaveable { mutableStateOf(flowState.phone) }
+    var otpInput by rememberSaveable { mutableStateOf("") }
+    var displayNameInput by rememberSaveable { mutableStateOf(flowState.prefilledName) }
+    var userIdInput by rememberSaveable { mutableStateOf(flowState.verifiedUserId) }
+    var skippedAvatar by rememberSaveable { mutableStateOf(false) }
 
-    val deviceId = rememberSaveable {
-        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-            ?: "unknown_device"
+    LaunchedEffect(flowState.verifiedUserId, flowState.prefilledName) {
+        if (userIdInput.isBlank() && flowState.verifiedUserId.isNotBlank()) {
+            userIdInput = flowState.verifiedUserId
+        }
+        if (displayNameInput.isBlank() && flowState.prefilledName.isNotBlank()) {
+            displayNameInput = flowState.prefilledName
+        }
     }
 
-    var phone by rememberSaveable { mutableStateOf("") }
-    var otp by rememberSaveable { mutableStateOf("") }
-    var displayName by rememberSaveable { mutableStateOf("") }
-    var selectedPhotoUri by rememberSaveable { mutableStateOf<String?>(null) }
-
-    var otpSent by rememberSaveable { mutableStateOf(false) }
-    var otpVerified by rememberSaveable { mutableStateOf(false) }
-    var actionBusy by rememberSaveable { mutableStateOf(false) }
-    var localError by rememberSaveable { mutableStateOf<String?>(null) }
-    var infoMessage by rememberSaveable { mutableStateOf<String?>(null) }
-
     val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
         if (uri != null) {
-            selectedPhotoUri = uri.toString()
-            localError = null
+            skippedAvatar = false
+            onPickAvatarPhoto(uri)
         }
     }
 
     val primaryColor = MaterialTheme.colorScheme.primary
     val containerColor = MaterialTheme.colorScheme.primaryContainer
-
-    fun clearNotices() {
-        localError = null
-        infoMessage = null
-        if (errorMessage != null) onClearError()
-    }
-
-    fun sendOtpToServer() {
-        val cleanPhone = phone.trim()
-        if (cleanPhone.length < 10) {
-            localError = "कृपया सही मोबाइल नंबर दर्ज करें।"
-            return
-        }
-        coroutineScope.launch {
-            actionBusy = true
-            localError = null
-            infoMessage = null
-            try {
-                delay(250)
-                otpSent = true
-                infoMessage = "OTP तैयार है। कृपया OTP दर्ज करके वेरिफाई करें।"
-            } catch (e: Exception) {
-                localError = "OTP भेजने में समस्या आई: ${e.localizedMessage ?: "एरर"}"
-            } finally {
-                actionBusy = false
-            }
-        }
-    }
-
-    fun verifyOtpCode() {
-        val cleanPhone = phone.trim()
-        val cleanOtp = otp.trim()
-        if (cleanPhone.length < 10 || cleanOtp.isEmpty()) {
-            localError = "फोन नंबर और OTP दोनों भरें।"
-            return
-        }
-        coroutineScope.launch {
-            actionBusy = true
-            localError = null
-            infoMessage = null
-            try {
-                delay(250)
-                otpVerified = true
-                infoMessage = "OTP वेरीफाई हो गया! अब अपना नाम लिखें (फोटो बाद में भी लगा सकते हैं)।"
-            } catch (e: Exception) {
-                localError = "OTP वेरिफिकेशन में त्रुटि: ${e.localizedMessage ?: "एरर"}"
-            } finally {
-                actionBusy = false
-            }
-        }
-    }
-
-    fun completeLogin(skipPhoto: Boolean) {
-        val cleanName = displayName.trim()
-        val cleanPhone = phone.trim()
-        if (!otpVerified) {
-            localError = "पहले फोन नंबर पर OTP वेरिफाई करें।"
-            return
-        }
-        if (cleanName.isEmpty()) {
-            localError = "नाम लिखना अनिवार्य है।"
-            return
-        }
-        val finalPhoto = if (skipPhoto) null else selectedPhotoUri
-        val generatedOrPhoneId = cleanPhone.filter { it.isDigit() }.ifEmpty { "user_${deviceId.takeLast(6)}" }
-        onSubmit(generatedOrPhoneId, cleanName, cleanPhone, deviceId, finalPhoto)
-    }
-
-    val busyNow = isLoading || actionBusy
-    val activeError = localError ?: errorMessage
 
     Box(
         modifier = Modifier
@@ -219,7 +162,9 @@ fun LoginScreen(
             verticalArrangement = Arrangement.Center
         ) {
             Column(
-                modifier = Modifier.widthIn(max = 460.dp).fillMaxWidth(),
+                modifier = Modifier
+                    .widthIn(max = 460.dp)
+                    .fillMaxWidth(),
                 horizontalAlignment = Alignment.Start
             ) {
                 Surface(
@@ -237,7 +182,7 @@ fun LoginScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
                 Text(
                     text = "Hello Sir",
@@ -248,12 +193,12 @@ fun LoginScreen(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Phone + OTP login with single-device lock.",
+                    text = "Phone-verified messaging, WebRTC calls, and live GPS bound to your single-device Keystore.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 AnimatedVisibility(visible = serverStatus == ServerStatus.WAKING_UP) {
                     Surface(
@@ -261,7 +206,7 @@ fun LoginScreen(
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 16.dp)
+                            .padding(bottom = 14.dp)
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -284,241 +229,505 @@ fun LoginScreen(
 
                 Card(
                     shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "Phone & OTP Login",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Only one account is allowed on this phone.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
+                        // Step Progress Pill
+                        StepHeaderRow(currentStep = flowState.step)
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // 1. Phone Number
-                        OutlinedTextField(
-                            value = phone,
-                            onValueChange = {
-                                phone = it
-                                clearNotices()
-                            },
-                            enabled = !busyNow && !otpVerified,
-                            label = { Text("Phone Number") },
-                            placeholder = { Text("e.g. 9876543210") },
-                            leadingIcon = {
-                                Icon(Icons.Rounded.Phone, contentDescription = "Phone Number")
-                            },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("login_phone_input")
-                        )
-
-                        if (!otpVerified) {
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            if (!otpSent) {
-                                Button(
-                                    onClick = { sendOtpToServer() },
-                                    enabled = !busyNow && phone.trim().length >= 10,
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp)
-                                        .testTag("send_otp_button")
-                                ) {
-                                    Text("Send OTP")
-                                }
-                            } else {
-                                // 2. OTP Input
-                                OutlinedTextField(
-                                    value = otp,
-                                    onValueChange = {
-                                        otp = it
-                                        clearNotices()
-                                    },
-                                    enabled = !busyNow,
-                                    label = { Text("Enter OTP") },
-                                    placeholder = { Text("4-digit OTP") },
-                                    leadingIcon = {
-                                        Icon(Icons.Rounded.Sms, contentDescription = "OTP")
-                                    },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("login_otp_input")
-                                )
-
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Button(
-                                        onClick = { verifyOtpCode() },
-                                        enabled = !busyNow && otp.trim().isNotEmpty(),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .testTag("verify_otp_button")
-                                    ) {
-                                        Text("Verify OTP")
-                                    }
-
-                                    TextButton(
-                                        onClick = { sendOtpToServer() },
-                                        enabled = !busyNow
-                                    ) {
-                                        Text("Resend")
-                                    }
-                                }
-                            }
-                        } else {
-                            // 3. Name (Mandatory) + Photo (Optional / Skip Later)
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "OTP Verified",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            OutlinedTextField(
-                                value = displayName,
-                                onValueChange = {
-                                    displayName = it
-                                    clearNotices()
-                                },
-                                enabled = !busyNow,
-                                label = { Text("Full Name (Required)") },
-                                placeholder = { Text("अपना नाम लिखें") },
-                                leadingIcon = {
-                                    Icon(Icons.Rounded.Person, contentDescription = "Full Name")
-                                },
-                                singleLine = true,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("login_name_input")
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                OutlinedButton(
-                                    onClick = { photoPickerLauncher.launch("image/*") },
-                                    enabled = !busyNow,
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.PhotoCamera,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        if (selectedPhotoUri != null) "Photo Selected" else "Choose Photo"
+                        AnimatedContent(
+                            targetState = flowState.step,
+                            label = "otp_login_step"
+                        ) { step ->
+                            when (step) {
+                                OtpLoginStep.PHONE_ENTRY -> {
+                                    PhoneEntrySection(
+                                        phone = phoneInput,
+                                        deviceId = flowState.deviceId,
+                                        isLoading = flowState.isLoading,
+                                        errorMessage = flowState.errorMessage,
+                                        onPhoneChange = {
+                                            phoneInput = it
+                                            if (flowState.errorMessage != null) onClearError()
+                                        },
+                                        onSubmit = { onSendOtp(phoneInput) }
                                     )
                                 }
 
-                                TextButton(
-                                    onClick = { completeLogin(skipPhoto = true) },
-                                    enabled = !busyNow && displayName.trim().isNotEmpty()
-                                ) {
-                                    Text("बाद में करें (Skip)")
+                                OtpLoginStep.OTP_VERIFICATION -> {
+                                    OtpVerificationSection(
+                                        phone = flowState.phone,
+                                        otp = otpInput,
+                                        resendSeconds = flowState.resendCountdownSeconds,
+                                        isLoading = flowState.isLoading,
+                                        infoMessage = flowState.infoMessage,
+                                        errorMessage = flowState.errorMessage,
+                                        onOtpChange = {
+                                            if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
+                                                otpInput = it
+                                                if (flowState.errorMessage != null) onClearError()
+                                            }
+                                        },
+                                        onVerify = { onVerifyOtp(otpInput) },
+                                        onResend = { onSendOtp(flowState.phone) },
+                                        onChangePhone = {
+                                            otpInput = ""
+                                            onChangePhone()
+                                        }
+                                    )
                                 }
-                            }
 
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            Button(
-                                onClick = { completeLogin(skipPhoto = false) },
-                                enabled = !busyNow && displayName.trim().isNotEmpty(),
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(52.dp)
-                                    .testTag("login_submit_button")
-                            ) {
-                                if (busyNow) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(22.dp),
-                                        strokeWidth = 2.5.dp,
-                                        color = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text("Securing Session…")
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "Complete Login",
-                                        style = MaterialTheme.typography.titleMedium
+                                OtpLoginStep.PROFILE_SETUP -> {
+                                    ProfileSetupSection(
+                                        phone = flowState.phone,
+                                        deviceId = flowState.deviceId,
+                                        userId = userIdInput,
+                                        displayName = displayNameInput,
+                                        avatarPreview = if (skippedAvatar) null else (flowState.localAvatarPreviewUri ?: flowState.avatarUrl),
+                                        isAvatarUploading = flowState.isAvatarUploading,
+                                        isSkipped = skippedAvatar,
+                                        isLoading = flowState.isLoading,
+                                        errorMessage = flowState.errorMessage,
+                                        onUserIdChange = {
+                                            userIdInput = it
+                                            if (flowState.errorMessage != null) onClearError()
+                                        },
+                                        onDisplayNameChange = {
+                                            displayNameInput = it
+                                            if (flowState.errorMessage != null) onClearError()
+                                        },
+                                        onPickPhotoClick = {
+                                            photoPickerLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        },
+                                        onSkipPhotoClick = {
+                                            skippedAvatar = true
+                                            onSkipAvatarPhoto()
+                                        },
+                                        onComplete = {
+                                            val finalAvatar = if (skippedAvatar) null else flowState.avatarUrl
+                                            onCompleteRegistration(
+                                                userIdInput,
+                                                displayNameInput,
+                                                flowState.phone,
+                                                flowState.deviceId,
+                                                finalAvatar
+                                            )
+                                        }
                                     )
                                 }
                             }
-                        }
-
-                        if (!infoMessage.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = infoMessage!!,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-
-                        if (!activeError.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = activeError!!,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                fontWeight = FontWeight.Medium
-                            )
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StepHeaderRow(currentStep: OtpLoginStep) {
+    val stepIndex = when (currentStep) {
+        OtpLoginStep.PHONE_ENTRY -> 1
+        OtpLoginStep.OTP_VERIFICATION -> 2
+        OtpLoginStep.PROFILE_SETUP -> 3
+    }
+    val stepTitle = when (currentStep) {
+        OtpLoginStep.PHONE_ENTRY -> "Phone Verification"
+        OtpLoginStep.OTP_VERIFICATION -> "Enter OTP Code"
+        OtpLoginStep.PROFILE_SETUP -> "Complete Profile"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = stepTitle,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.primaryContainer
+        ) {
+            Text(
+                text = "Step $stepIndex of 3",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PhoneEntrySection(
+    phone: String,
+    deviceId: String,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onPhoneChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Column {
+        Text(
+            text = "Sign in with your phone number. Your session locks exclusively to this hardware device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = phone,
+            onValueChange = onPhoneChange,
+            label = { Text("Phone Number") },
+            placeholder = { Text("+91 9876543210") },
+            leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = "Phone Number") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Phone,
+                imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { if (!isLoading && phone.trim().length >= 6) onSubmit() }
+            ),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("login_phone_input")
+        )
+
+        if (deviceId.isNotBlank()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Device Lock: ${deviceId.take(16)}…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        if (errorMessage != null) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.Medium
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Button(
+            onClick = onSubmit,
+            enabled = !isLoading && phone.trim().length >= 6,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+                .testTag("send_otp_button")
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.5.dp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Sending OTP…")
+            } else {
+                Text("Send Verification Code", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OtpVerificationSection(
+    phone: String,
+    otp: String,
+    resendSeconds: Int,
+    isLoading: Boolean,
+    infoMessage: String?,
+    errorMessage: String?,
+    onOtpChange: (String) -> Unit,
+    onVerify: () -> Unit,
+    onResend: () -> Unit,
+    onChangePhone: () -> Unit
+) {
+    Column {
+        Text(
+            text = infoMessage ?: "Enter the 6-digit OTP sent to $phone",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = otp,
+            onValueChange = onOtpChange,
+            label = { Text("OTP Code") },
+            placeholder = { Text("6-digit code") },
+            leadingIcon = { Icon(Icons.Rounded.Pin, contentDescription = "OTP") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.NumberPassword,
+                imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { if (!isLoading && otp.length >= 4) onVerify() }
+            ),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("login_otp_input")
+        )
+
+        if (errorMessage != null) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.Medium
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onChangePhone, enabled = !isLoading) {
+                Text("Change Number")
+            }
+            TextButton(
+                onClick = onResend,
+                enabled = !isLoading && resendSeconds == 0
+            ) {
+                Text(if (resendSeconds > 0) "Resend (${resendSeconds}s)" else "Resend OTP")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = onVerify,
+            enabled = !isLoading && otp.length >= 4,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+                .testTag("verify_otp_button")
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.5.dp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Verifying…")
+            } else {
+                Icon(Icons.Rounded.VerifiedUser, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Verify OTP", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileSetupSection(
+    phone: String,
+    deviceId: String,
+    userId: String,
+    displayName: String,
+    avatarPreview: String?,
+    isAvatarUploading: Boolean,
+    isSkipped: Boolean,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onUserIdChange: (String) -> Unit,
+    onDisplayNameChange: (String) -> Unit,
+    onPickPhotoClick: () -> Unit,
+    onSkipPhotoClick: () -> Unit,
+    onComplete: () -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = "Verified: $phone",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Optional Profile Photo with Skip / Later option
+        Box(
+            modifier = Modifier
+                .size(92.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer)
+                .clickable(enabled = !isLoading && !isAvatarUploading, onClick = onPickPhotoClick)
+                .testTag("profile_photo_picker"),
+            contentAlignment = Alignment.Center
+        ) {
+            if (avatarPreview != null) {
+                AsyncImage(
+                    model = avatarPreview,
+                    contentDescription = "Selected Profile Photo",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.AddAPhoto,
+                    contentDescription = "Add Profile Photo",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+            if (isAvatarUploading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = onPickPhotoClick,
+                enabled = !isLoading && !isAvatarUploading,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(if (avatarPreview != null) "Change Photo" else "Add Photo")
+            }
+            TextButton(
+                onClick = onSkipPhotoClick,
+                enabled = !isLoading,
+                modifier = Modifier.testTag("skip_avatar_button")
+            ) {
+                Text(if (isSkipped) "Photo Skipped" else "Skip / Later")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = displayName,
+            onValueChange = onDisplayNameChange,
+            label = { Text("Display Name (Required)") },
+            placeholder = { Text("e.g. Avinash Kumar") },
+            leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = "Display Name") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("login_name_input")
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        OutlinedTextField(
+            value = userId,
+            onValueChange = onUserIdChange,
+            label = { Text("User ID") },
+            placeholder = { Text("e.g. avinash_01") },
+            leadingIcon = { Icon(Icons.Rounded.Badge, contentDescription = "User ID") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    if (!isLoading && !isAvatarUploading && displayName.isNotBlank() && userId.isNotBlank()) {
+                        onComplete()
+                    }
+                }
+            ),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("login_userid_input")
+        )
+
+        if (deviceId.isNotBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Hardware Lock ID: ${deviceId.take(18)}…",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (errorMessage != null) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.Medium
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Button(
+            onClick = onComplete,
+            enabled = !isLoading && !isAvatarUploading && displayName.isNotBlank() && userId.isNotBlank(),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+                .testTag("login_submit_button")
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.5.dp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Activating Device Lock…")
+            } else {
+                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Activate & Lock Device", style = MaterialTheme.typography.titleMedium)
             }
         }
     }

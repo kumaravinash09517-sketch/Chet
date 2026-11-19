@@ -19,8 +19,12 @@ import com.example.data.remote.IceServerDto
 import com.example.data.remote.RegisterUserRequest
 import com.example.data.remote.RemoteMessageDto
 import com.example.data.remote.SendMessageRequest
+import com.example.data.remote.SendOtpRequest
+import com.example.data.remote.SendOtpResponse
 import com.example.data.remote.SignalingClient
 import com.example.data.remote.SignalingEvent
+import com.example.data.remote.VerifyOtpRequest
+import com.example.data.remote.VerifyOtpResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -116,85 +120,198 @@ class ChatRepository(
         }
     }
 
-    suspend fun registerOrLogin(userId: String, displayName: String): Result<UserSession> =
-        withContext(Dispatchers.IO) {
-            val cleanId = userId.trim()
-            val cleanName = displayName.trim()
-            if (cleanId.isBlank() || cleanName.isBlank()) {
-                return@withContext Result.failure(IllegalArgumentException("User ID and Name are required."))
-            }
+    suspend fun getDeviceLockId(): String = sessionManager.getOrCreateDeviceLockId()
 
-            if (!sessionManager.canRegisterUser(cleanId)) {
+    suspend fun sendOtp(phone: String): Result<SendOtpResponse> = withContext(Dispatchers.IO) {
+        val cleanPhone = phone.trim()
+        if (cleanPhone.length < 6) {
+            return@withContext Result.failure(IllegalArgumentException("Enter a valid phone number."))
+        }
+        val deviceId = sessionManager.getOrCreateDeviceLockId()
+        return@withContext try {
+            val response = apiService.sendOtp(SendOtpRequest(phone = cleanPhone, deviceId = deviceId))
+            if (response.code() == 403) {
+                GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+            }
+            if (!response.isSuccessful) {
+                val errBody = response.errorBody()?.string()?.take(160)
                 return@withContext Result.failure(
-                    IllegalStateException("This device is locked to another registered account.")
+                    IllegalStateException(errBody?.ifBlank { null } ?: "OTP request failed (${response.code()})")
                 )
             }
+            val body = response.body() ?: SendOtpResponse(success = true)
+            if (!body.success) {
+                Result.failure(IllegalStateException(body.message ?: "Unable to send OTP."))
+            } else {
+                Result.success(body)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
-            val now = System.currentTimeMillis()
-            val formatted = formatDateTime(now)
-            val deviceLockId = sessionManager.getOrCreateDeviceLockId()
-
+    suspend fun verifyOtp(phone: String, otp: String): Result<VerifyOtpResponse> =
+        withContext(Dispatchers.IO) {
+            val cleanPhone = phone.trim()
+            val cleanOtp = otp.trim()
+            if (cleanOtp.length < 4) {
+                return@withContext Result.failure(IllegalArgumentException("Enter the verification code."))
+            }
+            val deviceId = sessionManager.getOrCreateDeviceLockId()
             return@withContext try {
-                val response = apiService.registerUser(
-                    RegisterUserRequest(
-                        userId = cleanId,
-                        displayName = cleanName,
-                        deviceLockId = deviceLockId,
-                        loginTimestamp = now,
-                        loginDateFormatted = formatted
-                    )
+                val response = apiService.verifyOtp(
+                    VerifyOtpRequest(phone = cleanPhone, otp = cleanOtp, deviceId = deviceId)
                 )
-
                 if (response.code() == 403) {
                     GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                     return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
                 }
-
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
-                        IllegalStateException("Server registration error (${response.code()})")
+                        IllegalStateException("OTP verification failed (${response.code()})")
                     )
                 }
-
-                val body = response.body()
-                val session = sessionManager.saveSession(
-                    userId = cleanId,
-                    displayName = cleanName,
-                    serverToken = body?.token,
-                    registeredAtMillis = now,
-                    registeredAtFormatted = formatted
-                )
-
-                userDao.upsertUser(
-                    UserEntity(
-                        userId = cleanId,
-                        displayName = cleanName,
-                        lastLoginMillis = now,
-                        lastLoginFormatted = formatted,
-                        isOnline = true
-                    )
-                )
-
-                // Notify backend admin webhook about verified registration/login
-                runCatching {
-                    apiService.sendAdminWebhook(
-                        AdminWebhookEventRequest(
-                            eventType = "USER_LOGIN",
-                            userId = cleanId,
-                            displayName = cleanName,
-                            timestamp = now,
-                            summary = "User $cleanName (@$cleanId) logged in at $formatted"
-                        )
-                    )
+                val body = response.body() ?: VerifyOtpResponse(success = false, message = "Empty server response")
+                if (!body.success) {
+                    Result.failure(IllegalStateException(body.message ?: "Invalid OTP code."))
+                } else {
+                    Result.success(body)
                 }
-
-                signalingClient.connect()
-                syncUserDirectory()
-                Result.success(session)
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
+
+    suspend fun uploadAvatarPhoto(uri: Uri, senderHint: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            return@withContext try {
+                val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+                val (fileName, _) = queryUriMetadata(uri)
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: return@withContext Result.failure(IllegalStateException("Unable to read selected image."))
+                val filePart = MultipartBody.Part.createFormData(
+                    "file",
+                    fileName ?: "avatar_${System.currentTimeMillis()}.jpg",
+                    bytes.toRequestBody(mimeType.toMediaTypeOrNull())
+                )
+                val resp = apiService.uploadMedia(
+                    file = filePart,
+                    type = "AVATAR".toRequestBody("text/plain".toMediaTypeOrNull()),
+                    senderId = senderHint.toRequestBody("text/plain".toMediaTypeOrNull())
+                )
+                if (resp.isSuccessful) {
+                    val url = resp.body()?.url
+                    if (!url.isNullOrBlank()) {
+                        Result.success(url)
+                    } else {
+                        Result.success(uri.toString())
+                    }
+                } else {
+                    Result.failure(IllegalStateException("Photo upload failed (${resp.code()})"))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    suspend fun registerOrLogin(
+        userId: String,
+        displayName: String,
+        phone: String = "",
+        deviceId: String = "",
+        avatarUrl: String? = null,
+        verifiedToken: String? = null
+    ): Result<UserSession> = withContext(Dispatchers.IO) {
+        val cleanPhone = phone.trim()
+        val fallbackId = cleanPhone.filter { it.isDigit() }.takeIf { it.isNotBlank() }?.let { "u_$it" } ?: ""
+        val cleanId = userId.trim().ifBlank { fallbackId }
+        val cleanName = displayName.trim()
+        if (cleanId.isBlank() || cleanName.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("User ID and Display Name are required."))
+        }
+
+        if (!sessionManager.canRegisterUser(cleanId, cleanPhone)) {
+            return@withContext Result.failure(
+                IllegalStateException("This device is locked to another registered account.")
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        val formatted = formatDateTime(now)
+        val hardwareDeviceId = sessionManager.getOrCreateDeviceLockId()
+        val effectiveDeviceId = deviceId.trim().ifBlank { hardwareDeviceId }
+
+        return@withContext try {
+            val response = apiService.registerUser(
+                RegisterUserRequest(
+                    userId = cleanId,
+                    displayName = cleanName,
+                    phone = cleanPhone,
+                    deviceId = effectiveDeviceId,
+                    deviceLockId = hardwareDeviceId,
+                    avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
+                    loginTimestamp = now,
+                    loginDateFormatted = formatted
+                )
+            )
+
+            if (response.code() == 403) {
+                GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+            }
+
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(
+                    IllegalStateException("Server registration error (${response.code()})")
+                )
+            }
+
+            val body = response.body()
+            val resolvedAvatar = body?.user?.avatarUrl ?: avatarUrl
+            val session = sessionManager.saveSession(
+                userId = cleanId,
+                displayName = cleanName,
+                phone = cleanPhone,
+                avatarUrl = resolvedAvatar,
+                serverToken = body?.token ?: verifiedToken,
+                registeredAtMillis = now,
+                registeredAtFormatted = formatted,
+                deviceIdOverride = effectiveDeviceId
+            )
+
+            userDao.upsertUser(
+                UserEntity(
+                    userId = cleanId,
+                    displayName = cleanName,
+                    phone = cleanPhone,
+                    avatarUrl = resolvedAvatar,
+                    lastLoginMillis = now,
+                    lastLoginFormatted = formatted,
+                    isOnline = true
+                )
+            )
+
+            // Notify backend admin webhook about verified registration/login
+            runCatching {
+                apiService.sendAdminWebhook(
+                    AdminWebhookEventRequest(
+                        eventType = "USER_LOGIN",
+                        userId = cleanId,
+                        displayName = cleanName,
+                        timestamp = now,
+                        summary = "User $cleanName (@$cleanId, $cleanPhone) logged in at $formatted"
+                    )
+                )
+            }
+
+            signalingClient.connect()
+            syncUserDirectory()
+            Result.success(session)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     suspend fun syncUserDirectory(): Result<List<UserEntity>> = withContext(Dispatchers.IO) {
         return@withContext try {
@@ -206,6 +323,8 @@ class ChatRepository(
                     UserEntity(
                         userId = dto.userId,
                         displayName = dto.displayName.ifBlank { dto.userId },
+                        phone = dto.phone,
+                        avatarUrl = dto.avatarUrl,
                         lastLoginMillis = millis,
                         lastLoginFormatted = dto.lastLoginFormatted.ifBlank { formatDateTime(millis) },
                         isOnline = dto.isOnline,
@@ -214,11 +333,20 @@ class ChatRepository(
                 }
                 if (mapped.isNotEmpty()) {
                     userDao.upsertUsers(mapped)
-                    // Ensure existing conversations display up-to-date names
                     mapped.forEach { user ->
                         val existing = conversationDao.getConversation(user.userId)
-                        if (existing != null && existing.peerName != user.displayName) {
-                            conversationDao.upsertConversation(existing.copy(peerName = user.displayName))
+                        if (existing != null &&
+                            (existing.peerName != user.displayName ||
+                                existing.peerPhone != user.phone ||
+                                existing.peerAvatarUrl != user.avatarUrl)
+                        ) {
+                            conversationDao.upsertConversation(
+                                existing.copy(
+                                    peerName = user.displayName,
+                                    peerPhone = user.phone,
+                                    peerAvatarUrl = user.avatarUrl
+                                )
+                            )
                         }
                     }
                 }
@@ -231,13 +359,46 @@ class ChatRepository(
         }
     }
 
+    suspend fun searchUsers(query: String): List<UserEntity> = withContext(Dispatchers.IO) {
+        val clean = query.trim()
+        if (clean.isBlank()) return@withContext emptyList()
+        try {
+            val response = apiService.searchUsers(clean)
+            if (response.isSuccessful) {
+                val remoteUsers = response.body()?.users.orEmpty()
+                val mapped = remoteUsers.map { dto ->
+                    val millis = if (dto.lastLoginMillis > 0L) dto.lastLoginMillis else System.currentTimeMillis()
+                    UserEntity(
+                        userId = dto.userId,
+                        displayName = dto.displayName.ifBlank { dto.userId },
+                        phone = dto.phone,
+                        avatarUrl = dto.avatarUrl,
+                        lastLoginMillis = millis,
+                        lastLoginFormatted = dto.lastLoginFormatted.ifBlank { formatDateTime(millis) },
+                        isOnline = dto.isOnline,
+                        isBlocked = dto.isBlocked
+                    )
+                }
+                if (mapped.isNotEmpty()) {
+                    userDao.upsertUsers(mapped)
+                }
+            }
+        } catch (_: Exception) {
+            // Fall back cleanly to local Room search
+        }
+        return@withContext userDao.searchUsers(clean)
+    }
+
     suspend fun startOrOpenConversation(peerId: String, peerName: String) = withContext(Dispatchers.IO) {
+        val peerUser = userDao.getUser(peerId)
         val existing = conversationDao.getConversation(peerId)
         if (existing == null) {
             conversationDao.upsertConversation(
                 ConversationEntity(
                     peerId = peerId,
-                    peerName = peerName,
+                    peerName = peerUser?.displayName ?: peerName,
+                    peerPhone = peerUser?.phone.orEmpty(),
+                    peerAvatarUrl = peerUser?.avatarUrl,
                     lastMessagePreview = "Tap to start secure chat",
                     lastMessageTimestamp = System.currentTimeMillis()
                 )
