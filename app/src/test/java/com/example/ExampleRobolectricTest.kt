@@ -103,6 +103,46 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `phone normalization standardizes 10-digit and E164 numbers consistently`() {
+        assertEquals("+919876543210", com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber("9876543210"))
+        assertEquals("+919876543210", com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber(" 098765-43210 "))
+        assertEquals("+919876543210", com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber("919876543210"))
+        assertEquals("+919876543210", com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber("+91 98765 43210"))
+        assertEquals("+14155550199", com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber("+1 (415) 555-0199"))
+    }
+
+    @Test
+    fun `parseApiErrorMessage extracts detail and message from HTTP 400 JSON`() {
+        val detailMsg = com.example.data.repository.PhoneAuthUtils.parseApiErrorMessage(
+            rawErrorBody = """{"detail":"Invalid or expired OTP"}""",
+            statusCode = 400,
+            fallback = "OTP verification failed"
+        )
+        assertEquals("Invalid or expired OTP", detailMsg)
+
+        val nullDetailMsg = com.example.data.repository.PhoneAuthUtils.parseApiErrorMessage(
+            rawErrorBody = """{"detail":null,"message":"OTP expired"}""",
+            statusCode = 400,
+            fallback = "OTP verification failed"
+        )
+        assertEquals("OTP expired", nullDetailMsg)
+
+        val arrayDetailMsg = com.example.data.repository.PhoneAuthUtils.parseApiErrorMessage(
+            rawErrorBody = """{"detail":[{"msg":"Phone format invalid"}]}""",
+            statusCode = 400,
+            fallback = "OTP request failed"
+        )
+        assertEquals("Phone format invalid", arrayDetailMsg)
+
+        val fallbackMsg = com.example.data.repository.PhoneAuthUtils.parseApiErrorMessage(
+            rawErrorBody = null,
+            statusCode = 400,
+            fallback = "OTP verification failed"
+        )
+        assertEquals("OTP verification failed (400)", fallbackMsg)
+    }
+
+    @Test
     fun `403 blocklist event sets blocked state`() {
         GlobalSecurityEventBus.clearBlocked()
         GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")

@@ -34,10 +34,62 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+
+object PhoneAuthUtils {
+    fun normalizePhoneNumber(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        val hasPlus = trimmed.startsWith("+")
+        val digits = trimmed.filter { it.isDigit() }
+        if (digits.isEmpty()) return ""
+        return when {
+            hasPlus -> "+$digits"
+            digits.length == 10 -> "+91$digits"
+            digits.length == 11 && digits.startsWith("0") -> "+91${digits.drop(1)}"
+            digits.length == 12 && digits.startsWith("91") -> "+$digits"
+            else -> "+$digits"
+        }
+    }
+
+    fun parseApiErrorMessage(rawErrorBody: String?, statusCode: Int, fallback: String): String {
+        val body = rawErrorBody?.trim().orEmpty()
+        if (body.isNotEmpty()) {
+            try {
+                val json = JSONObject(body)
+                val detail = json.opt("detail")
+                when (detail) {
+                    is String -> if (detail.isNotBlank()) return detail
+                    is JSONArray -> {
+                        val firstObj = detail.optJSONObject(0)
+                        val objMsg = if (firstObj != null && !firstObj.isNull("msg")) {
+                            firstObj.optString("msg")
+                        } else {
+                            ""
+                        }
+                        if (objMsg.isNotBlank()) return objMsg
+                        val strItem = if (!detail.isNull(0)) detail.optString(0) else ""
+                        if (strItem.isNotBlank()) return strItem
+                    }
+                }
+                val message = if (!json.isNull("message")) json.optString("message") else ""
+                if (message.isNotBlank()) return message
+                val error = if (!json.isNull("error")) json.optString("error") else ""
+                if (error.isNotBlank()) return error
+            } catch (_: Exception) {
+                if (body.length <= 160 && !body.startsWith("<")) {
+                    return body
+                }
+            }
+        }
+        return "$fallback ($statusCode)"
+    }
+}
 
 class ChatRepository(
     private val context: Context,
@@ -123,22 +175,24 @@ class ChatRepository(
     suspend fun getDeviceLockId(): String = sessionManager.getOrCreateDeviceLockId()
 
     suspend fun sendOtp(phone: String): Result<SendOtpResponse> = withContext(Dispatchers.IO) {
-        val cleanPhone = phone.trim()
-        if (cleanPhone.length < 6) {
+        val normalizedPhone = PhoneAuthUtils.normalizePhoneNumber(phone)
+        if (normalizedPhone.filter { it.isDigit() }.length < 8) {
             return@withContext Result.failure(IllegalArgumentException("Enter a valid phone number."))
         }
         val deviceId = sessionManager.getOrCreateDeviceLockId()
         return@withContext try {
-            val response = apiService.sendOtp(SendOtpRequest(phone = cleanPhone, deviceId = deviceId))
+            val response = apiService.sendOtp(SendOtpRequest(phone = normalizedPhone, deviceId = deviceId))
             if (response.code() == 403) {
                 GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                 return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
             }
             if (!response.isSuccessful) {
-                val errBody = response.errorBody()?.string()?.take(160)
-                return@withContext Result.failure(
-                    IllegalStateException(errBody?.ifBlank { null } ?: "OTP request failed (${response.code()})")
+                val errorMsg = PhoneAuthUtils.parseApiErrorMessage(
+                    rawErrorBody = response.errorBody()?.string(),
+                    statusCode = response.code(),
+                    fallback = "OTP request failed"
                 )
+                return@withContext Result.failure(IllegalStateException(errorMsg))
             }
             val body = response.body() ?: SendOtpResponse(success = true)
             if (!body.success) {
@@ -153,24 +207,30 @@ class ChatRepository(
 
     suspend fun verifyOtp(phone: String, otp: String): Result<VerifyOtpResponse> =
         withContext(Dispatchers.IO) {
-            val cleanPhone = phone.trim()
+            val normalizedPhone = PhoneAuthUtils.normalizePhoneNumber(phone)
             val cleanOtp = otp.trim()
+            if (normalizedPhone.filter { it.isDigit() }.length < 8) {
+                return@withContext Result.failure(IllegalArgumentException("Enter a valid phone number."))
+            }
             if (cleanOtp.length < 4) {
                 return@withContext Result.failure(IllegalArgumentException("Enter the verification code."))
             }
             val deviceId = sessionManager.getOrCreateDeviceLockId()
             return@withContext try {
                 val response = apiService.verifyOtp(
-                    VerifyOtpRequest(phone = cleanPhone, otp = cleanOtp, deviceId = deviceId)
+                    VerifyOtpRequest(phone = normalizedPhone, otp = cleanOtp, deviceId = deviceId)
                 )
                 if (response.code() == 403) {
                     GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                     return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
                 }
                 if (!response.isSuccessful) {
-                    return@withContext Result.failure(
-                        IllegalStateException("OTP verification failed (${response.code()})")
+                    val errorMsg = PhoneAuthUtils.parseApiErrorMessage(
+                        rawErrorBody = response.errorBody()?.string(),
+                        statusCode = response.code(),
+                        fallback = "OTP verification failed"
                     )
+                    return@withContext Result.failure(IllegalStateException(errorMsg))
                 }
                 val body = response.body() ?: VerifyOtpResponse(success = false, message = "Empty server response")
                 if (!body.success) {
@@ -223,7 +283,7 @@ class ChatRepository(
         avatarUrl: String? = null,
         verifiedToken: String? = null
     ): Result<UserSession> = withContext(Dispatchers.IO) {
-        val cleanPhone = phone.trim()
+        val cleanPhone = PhoneAuthUtils.normalizePhoneNumber(phone).ifBlank { phone.trim() }
         val fallbackId = cleanPhone.filter { it.isDigit() }.takeIf { it.isNotBlank() }?.let { "u_$it" } ?: ""
         val cleanId = userId.trim().ifBlank { fallbackId }
         val cleanName = displayName.trim()
@@ -262,9 +322,12 @@ class ChatRepository(
             }
 
             if (!response.isSuccessful) {
-                return@withContext Result.failure(
-                    IllegalStateException("Server registration error (${response.code()})")
+                val errorMsg = PhoneAuthUtils.parseApiErrorMessage(
+                    rawErrorBody = response.errorBody()?.string(),
+                    statusCode = response.code(),
+                    fallback = "Server registration error"
                 )
+                return@withContext Result.failure(IllegalStateException(errorMsg))
             }
 
             val body = response.body()

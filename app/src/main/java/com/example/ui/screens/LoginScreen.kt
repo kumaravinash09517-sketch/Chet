@@ -265,11 +265,10 @@ fun LoginScreen(
                                         isLoading = flowState.isLoading,
                                         infoMessage = flowState.infoMessage,
                                         errorMessage = flowState.errorMessage,
-                                        onOtpChange = {
-                                            if (it.length <= 6 && it.all { ch -> ch.isDigit() }) {
-                                                otpInput = it
-                                                if (flowState.errorMessage != null) onClearError()
-                                            }
+                                        onOtpChange = { rawOtp ->
+                                            val cleaned = rawOtp.trim().filter { ch -> ch.isDigit() }.take(6)
+                                            otpInput = cleaned
+                                            if (flowState.errorMessage != null) onClearError()
                                         },
                                         onVerify = { onVerifyOtp(otpInput) },
                                         onResend = { onSendOtp(flowState.phone) },
@@ -480,7 +479,7 @@ private fun OtpVerificationSection(
 ) {
     Column {
         Text(
-            text = infoMessage ?: "Enter the 6-digit OTP sent to $phone",
+            text = infoMessage ?: "OTP sent to your WhatsApp number ($phone) and admin Telegram relay if configured.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -498,7 +497,7 @@ private fun OtpVerificationSection(
                 imeAction = ImeAction.Done
             ),
             keyboardActions = KeyboardActions(
-                onDone = { if (!isLoading && otp.length >= 4) onVerify() }
+                onDone = { if (!isLoading && otp.trim().length >= 4) onVerify() }
             ),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier
@@ -538,7 +537,7 @@ private fun OtpVerificationSection(
 
         Button(
             onClick = onVerify,
-            enabled = !isLoading && otp.length >= 4,
+            enabled = !isLoading && otp.trim().length >= 4,
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .fillMaxWidth()

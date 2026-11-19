@@ -125,25 +125,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendOtp(phone: String) {
-        val cleanPhone = phone.trim()
+        val normalizedPhone = com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber(phone)
         viewModelScope.launch {
             val deviceId = _loginFlowState.value.deviceId.ifBlank { repository.getDeviceLockId() }
             _loginFlowState.update {
                 it.copy(
-                    phone = cleanPhone,
+                    phone = normalizedPhone,
                     deviceId = deviceId,
                     isLoading = true,
                     errorMessage = null,
                     infoMessage = null
                 )
             }
-            val result = repository.sendOtp(cleanPhone)
+            val result = repository.sendOtp(normalizedPhone)
             result.onSuccess { resp ->
                 _loginFlowState.update {
                     it.copy(
                         step = OtpLoginStep.OTP_VERIFICATION,
                         isLoading = false,
-                        infoMessage = resp.message ?: "Verification code sent to $cleanPhone"
+                        infoMessage = resp.message?.takeIf { msg -> msg.isNotBlank() }
+                            ?: "OTP sent to your WhatsApp number ($normalizedPhone) and admin relay."
                     )
                 }
                 startOtpCountdown(resp.expiresInSeconds.coerceIn(30, 120))
@@ -159,17 +160,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun verifyOtp(otp: String) {
-        val phone = _loginFlowState.value.phone
+        val normalizedPhone = com.example.data.repository.PhoneAuthUtils.normalizePhoneNumber(
+            _loginFlowState.value.phone
+        )
+        val cleanOtp = otp.trim()
         viewModelScope.launch {
             _loginFlowState.update { it.copy(isLoading = true, errorMessage = null) }
-            val result = repository.verifyOtp(phone, otp)
+            val result = repository.verifyOtp(normalizedPhone, cleanOtp)
             result.onSuccess { resp ->
                 countdownJob?.cancel()
                 val derivedId = resp.userId?.takeIf { it.isNotBlank() }
-                    ?: ("u_" + phone.filter { it.isDigit() }.ifBlank { phone })
+                    ?: ("u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone })
                 _loginFlowState.update {
                     it.copy(
                         step = OtpLoginStep.PROFILE_SETUP,
+                        phone = normalizedPhone,
                         verifiedUserId = derivedId,
                         verifiedToken = resp.token,
                         prefilledName = resp.displayName.orEmpty(),
