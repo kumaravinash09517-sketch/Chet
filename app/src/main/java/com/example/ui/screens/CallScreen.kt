@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,6 +46,8 @@ import com.example.rtc.CallState
 import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.ObsidianBackground
+import org.webrtc.EglBase
+import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import java.util.Locale
 
@@ -67,8 +68,23 @@ fun CallScreen(
     onSwitchCamera: () -> Unit
 ) {
     val context = LocalContext.current
-    val remoteView = remember { SurfaceViewRenderer(context) }
-    val localView = remember { SurfaceViewRenderer(context) }
+
+    val eglBase = remember { EglBase.create() }
+    val remoteView = remember {
+        SurfaceViewRenderer(context).apply {
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            setMirror(false)
+            init(eglBase.eglBaseContext, null)
+        }
+    }
+    val localView = remember {
+        SurfaceViewRenderer(context).apply {
+            setZOrderMediaOverlay(true)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            setMirror(true)
+            init(eglBase.eglBaseContext, null)
+        }
+    }
 
     val isVideoCall = when (callState) {
         is CallState.OutgoingRinging -> callState.isVideo
@@ -76,6 +92,12 @@ fun CallScreen(
         is CallState.Connected -> callState.isVideo
         else -> false
     }
+
+    val showLocalPreview = isVideoCall && isVideoEnabled && (
+        callState is CallState.OutgoingRinging || callState is CallState.Connected
+    )
+
+    val showRemoteVideo = isVideoCall && callState is CallState.Connected
 
     val peerName = when (callState) {
         is CallState.OutgoingRinging -> callState.peerName
@@ -92,11 +114,23 @@ fun CallScreen(
         CallState.Idle -> ""
     }
 
-    DisposableEffect(callState) {
-        if (isVideoCall && callState is CallState.Connected) {
+    DisposableEffect(isVideoCall, callState) {
+        if (isVideoCall && callState !is CallState.Idle && callState !is CallState.Ended) {
             onAttachRenderers(localView, remoteView)
+        } else {
+            onAttachRenderers(null, null)
         }
-        onDispose {}
+        onDispose {
+            onAttachRenderers(null, null)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { localView.release() }
+            runCatching { remoteView.release() }
+            runCatching { eglBase.release() }
+        }
     }
 
     Box(
@@ -111,22 +145,34 @@ fun CallScreen(
             .navigationBarsPadding()
     ) {
         // Remote Video Surface
-        if (isVideoCall && callState is CallState.Connected) {
+        if (showRemoteVideo) {
             AndroidView(
                 factory = { remoteView },
+                update = { view ->
+                    view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                },
                 modifier = Modifier.fillMaxSize()
             )
-            // Local PiP Video Surface
+        }
+
+        // Local Self-Camera PiP Preview
+        if (showLocalPreview) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 shadowElevation = 6.dp,
+                color = Color.Black,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = 20.dp, end = 16.dp)
-                    .size(width = 110.dp, height = 156.dp)
+                    .size(width = 114.dp, height = 160.dp)
+                    .testTag("local_camera_preview")
             ) {
                 AndroidView(
                     factory = { localView },
+                    update = { view ->
+                        view.setZOrderMediaOverlay(true)
+                        view.setMirror(true)
+                    },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -139,7 +185,7 @@ fun CallScreen(
                 .padding(top = 48.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (!isVideoCall || callState !is CallState.Connected) {
+            if (!showRemoteVideo) {
                 Box(
                     modifier = Modifier
                         .size(104.dp)
