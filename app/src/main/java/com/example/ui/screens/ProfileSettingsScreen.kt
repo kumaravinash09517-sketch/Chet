@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
+import android.graphics.BitmapFactory
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Security
@@ -29,6 +36,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,14 +50,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.core.security.UserSession
+import com.example.data.remote.RetrofitClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,7 +77,61 @@ fun ProfileSettingsScreen(
     onBack: () -> Unit,
     onLogoutConfirmed: () -> Unit
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
     var showConfirmLogout by remember { mutableStateOf(false) }
+    var photoUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var isSavingPhoto by remember { mutableStateOf(false) }
+    var photoStatusMessage by remember { mutableStateOf<String?>(null) }
+
+    val selectedBitmap = remember(photoUriString) {
+        photoUriString?.let { uriStr ->
+            try {
+                context.contentResolver.openInputStream(Uri.parse(uriStr))?.use { stream ->
+                    BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    fun syncPhotoToServer(uriStr: String) {
+        coroutineScope.launch {
+            isSavingPhoto = true
+            photoStatusMessage = null
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    RetrofitClient.api.updateProfile(
+                        mapOf(
+                            "user_id" to session.userId,
+                            "avatar_url" to uriStr
+                        )
+                    )
+                }
+                photoStatusMessage = if (res.isSuccessful) {
+                    "प्रोफाइल फोटो अपडेट हो गई है।"
+                } else {
+                    "फोटो सेव हो गई, सर्वर सिंक (${res.code()})।"
+                }
+            } catch (e: Exception) {
+                photoStatusMessage = "फोटो लोकली सेट है (${e.localizedMessage ?: "ऑफलाइन/नेटवर्क"})।"
+            } finally {
+                isSavingPhoto = false
+            }
+        }
+    }
+
+    val editPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val uriStr = uri.toString()
+            photoUriString = uriStr
+            syncPhotoToServer(uriStr)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -91,44 +162,99 @@ fun ProfileSettingsScreen(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Identity Card
+                // Identity Card with Edit Photo Button
                 Card(
                     shape = RoundedCornerShape(22.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(20.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = session.displayName.take(1).uppercase(),
-                                style = MaterialTheme.typography.headlineMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clickable { editPhotoLauncher.launch("image/*") },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(68.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primaryContainer),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (selectedBitmap != null) {
+                                        Image(
+                                            bitmap = selectedBitmap,
+                                            contentDescription = "Profile Photo",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    } else {
+                                        Text(
+                                            text = session.displayName.take(1).uppercase(),
+                                            style = MaterialTheme.typography.headlineMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+
+                                // Edit Button Badge
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .align(Alignment.BottomEnd)
+                                        .testTag("edit_profile_photo_button")
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        if (isSavingPhoto) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.onPrimary
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Edit,
+                                                contentDescription = "Edit Photo",
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(16.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = session.displayName,
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Text(
+                                    text = "@${session.userId}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Registered: ${session.registeredAtFormatted}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column {
+
+                        if (!photoStatusMessage.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(10.dp))
                             Text(
-                                text = session.displayName,
-                                style = MaterialTheme.typography.titleLarge
-                            )
-                            Text(
-                                text = "@${session.userId}",
-                                style = MaterialTheme.typography.labelMedium,
+                                text = photoStatusMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Registered: ${session.registeredAtFormatted}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
