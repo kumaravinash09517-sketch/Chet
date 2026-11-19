@@ -143,6 +143,46 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `sendOtpResponse resolves telegram_bot_url and bot_username`() {
+        val direct = com.example.data.remote.SendOtpResponse(
+            telegramBotUrl = "https://t.me/HelloSirOtpBot?start=123"
+        )
+        assertEquals("https://t.me/HelloSirOtpBot?start=123", direct.resolvedTelegramBotUrl())
+
+        val fromUsername = com.example.data.remote.SendOtpResponse(
+            botUsername = "@HelloSirOtpBot"
+        )
+        assertEquals("https://t.me/HelloSirOtpBot", fromUsername.resolvedTelegramBotUrl())
+    }
+
+    @Test
+    fun `verifyOtpResponse advances to profile setup on HTTP 200 even when name is requested`() {
+        val standardOk = com.example.data.remote.VerifyOtpResponse(success = true)
+        assertTrue(standardOk.isOtpVerified())
+
+        val verifiedWithProfileFlag = com.example.data.remote.VerifyOtpResponse(
+            success = false,
+            verified = true,
+            requiresProfile = true,
+            message = "Please enter your name"
+        )
+        assertTrue(verifiedWithProfileFlag.isOtpVerified())
+
+        val promptForNameOnly = com.example.data.remote.VerifyOtpResponse(
+            success = false,
+            message = "Display name is required for registration"
+        )
+        assertTrue(promptForNameOnly.isOtpVerified())
+
+        val invalidOtp = com.example.data.remote.VerifyOtpResponse(
+            success = false,
+            verified = false,
+            message = "Invalid OTP code"
+        )
+        org.junit.Assert.assertFalse(invalidOtp.isOtpVerified())
+    }
+
+    @Test
     fun `403 blocklist event sets blocked state`() {
         GlobalSecurityEventBus.clearBlocked()
         GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")

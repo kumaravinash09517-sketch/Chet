@@ -1,12 +1,15 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -30,19 +33,20 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AddAPhoto
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material.icons.rounded.Pin
-import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -54,6 +58,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,12 +68,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.R
 import com.example.core.security.ServerStatus
 import com.example.ui.viewmodel.LoginFlowState
 import com.example.ui.viewmodel.OtpLoginStep
@@ -91,18 +99,24 @@ fun LoginScreen(
     ) -> Unit,
     onClearError: () -> Unit
 ) {
+    val context = LocalContext.current
     var phoneInput by rememberSaveable { mutableStateOf(flowState.phone) }
     var otpInput by rememberSaveable { mutableStateOf("") }
     var displayNameInput by rememberSaveable { mutableStateOf(flowState.prefilledName) }
     var userIdInput by rememberSaveable { mutableStateOf(flowState.verifiedUserId) }
     var skippedAvatar by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(flowState.verifiedUserId, flowState.prefilledName) {
-        if (userIdInput.isBlank() && flowState.verifiedUserId.isNotBlank()) {
-            userIdInput = flowState.verifiedUserId
+    LaunchedEffect(flowState.step, flowState.verifiedUserId, flowState.prefilledName) {
+        if (flowState.step == OtpLoginStep.PHONE_ENTRY) {
+            otpInput = ""
         }
-        if (displayNameInput.isBlank() && flowState.prefilledName.isNotBlank()) {
-            displayNameInput = flowState.prefilledName
+        if (flowState.step == OtpLoginStep.PROFILE_SETUP) {
+            if (flowState.verifiedUserId.isNotBlank()) {
+                userIdInput = flowState.verifiedUserId
+            }
+            if (displayNameInput.isBlank() && flowState.prefilledName.isNotBlank()) {
+                displayNameInput = flowState.prefilledName
+            }
         }
     }
 
@@ -168,18 +182,16 @@ fun LoginScreen(
                 horizontalAlignment = Alignment.Start
             ) {
                 Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(64.dp)
+                    shape = RoundedCornerShape(18.dp),
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.size(68.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.Shield,
-                            contentDescription = "Hello Sir Security",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
+                    Image(
+                        painter = painterResource(id = R.drawable.hello_sir_badge),
+                        contentDescription = "Hello Sir Brand Logo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(18.dp))
@@ -262,6 +274,7 @@ fun LoginScreen(
                                         phone = flowState.phone,
                                         otp = otpInput,
                                         resendSeconds = flowState.resendCountdownSeconds,
+                                        telegramBotUrl = flowState.telegramBotUrl,
                                         isLoading = flowState.isLoading,
                                         infoMessage = flowState.infoMessage,
                                         errorMessage = flowState.errorMessage,
@@ -269,6 +282,18 @@ fun LoginScreen(
                                             val cleaned = rawOtp.trim().filter { ch -> ch.isDigit() }.take(6)
                                             otpInput = cleaned
                                             if (flowState.errorMessage != null) onClearError()
+                                        },
+                                        onOpenTelegramBot = { botUrl ->
+                                            runCatching {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(botUrl))
+                                                context.startActivity(intent)
+                                            }.onFailure {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Unable to open Telegram link on this device.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         },
                                         onVerify = { onVerifyOtp(otpInput) },
                                         onResend = { onSendOtp(flowState.phone) },
@@ -289,6 +314,7 @@ fun LoginScreen(
                                         isAvatarUploading = flowState.isAvatarUploading,
                                         isSkipped = skippedAvatar,
                                         isLoading = flowState.isLoading,
+                                        infoMessage = flowState.infoMessage,
                                         errorMessage = flowState.errorMessage,
                                         onUserIdChange = {
                                             userIdInput = it
@@ -469,20 +495,53 @@ private fun OtpVerificationSection(
     phone: String,
     otp: String,
     resendSeconds: Int,
+    telegramBotUrl: String?,
     isLoading: Boolean,
     infoMessage: String?,
     errorMessage: String?,
     onOtpChange: (String) -> Unit,
+    onOpenTelegramBot: (String) -> Unit,
     onVerify: () -> Unit,
     onResend: () -> Unit,
     onChangePhone: () -> Unit
 ) {
     Column {
         Text(
-            text = infoMessage ?: "OTP sent to your WhatsApp number ($phone) and admin Telegram relay if configured.",
+            text = infoMessage ?: "OTP sent to your WhatsApp number ($phone).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+
+        if (!telegramBotUrl.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            FilledTonalButton(
+                onClick = { onOpenTelegramBot(telegramBotUrl) },
+                enabled = !isLoading,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("open_telegram_otp_bot_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = "Open Telegram OTP Bot",
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Telegram पर OTP पाएँ (Open Bot)",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Opens your private OTP bot — only your own verification code is sent.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
         Spacer(modifier = Modifier.height(14.dp))
 
         OutlinedTextField(
@@ -571,6 +630,7 @@ private fun ProfileSetupSection(
     isAvatarUploading: Boolean,
     isSkipped: Boolean,
     isLoading: Boolean,
+    infoMessage: String?,
     errorMessage: String?,
     onUserIdChange: (String) -> Unit,
     onDisplayNameChange: (String) -> Unit,
@@ -578,12 +638,37 @@ private fun ProfileSetupSection(
     onSkipPhotoClick: () -> Unit,
     onComplete: () -> Unit
 ) {
+    var localNameError by remember { mutableStateOf<String?>(null) }
+
+    val validateAndComplete = {
+        when {
+            displayName.trim().isEmpty() -> {
+                localNameError = "Please enter your display name to continue."
+            }
+            userId.trim().isEmpty() -> {
+                localNameError = "User ID cannot be empty."
+            }
+            else -> {
+                localNameError = null
+                onComplete()
+            }
+        }
+    }
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = "Verified: $phone",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary
         )
+        if (!infoMessage.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = infoMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(modifier = Modifier.height(14.dp))
 
         // Optional Profile Photo with Skip / Later option
@@ -649,10 +734,14 @@ private fun ProfileSetupSection(
 
         OutlinedTextField(
             value = displayName,
-            onValueChange = onDisplayNameChange,
+            onValueChange = {
+                localNameError = null
+                onDisplayNameChange(it)
+            },
             label = { Text("Display Name (Required)") },
             placeholder = { Text("e.g. Avinash Kumar") },
             leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = "Display Name") },
+            isError = localNameError != null,
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             shape = RoundedCornerShape(14.dp),
@@ -665,7 +754,10 @@ private fun ProfileSetupSection(
 
         OutlinedTextField(
             value = userId,
-            onValueChange = onUserIdChange,
+            onValueChange = {
+                localNameError = null
+                onUserIdChange(it)
+            },
             label = { Text("User ID") },
             placeholder = { Text("e.g. avinash_01") },
             leadingIcon = { Icon(Icons.Rounded.Badge, contentDescription = "User ID") },
@@ -673,8 +765,8 @@ private fun ProfileSetupSection(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(
                 onDone = {
-                    if (!isLoading && !isAvatarUploading && displayName.isNotBlank() && userId.isNotBlank()) {
-                        onComplete()
+                    if (!isLoading && !isAvatarUploading) {
+                        validateAndComplete()
                     }
                 }
             ),
@@ -693,10 +785,11 @@ private fun ProfileSetupSection(
             )
         }
 
-        if (errorMessage != null) {
+        val combinedError = localNameError ?: errorMessage
+        if (combinedError != null) {
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = errorMessage,
+                text = combinedError,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
                 fontWeight = FontWeight.Medium
@@ -706,8 +799,8 @@ private fun ProfileSetupSection(
         Spacer(modifier = Modifier.height(18.dp))
 
         Button(
-            onClick = onComplete,
-            enabled = !isLoading && !isAvatarUploading && displayName.isNotBlank() && userId.isNotBlank(),
+            onClick = validateAndComplete,
+            enabled = !isLoading && !isAvatarUploading,
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             modifier = Modifier

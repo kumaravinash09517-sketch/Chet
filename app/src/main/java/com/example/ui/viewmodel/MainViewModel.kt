@@ -34,6 +34,8 @@ enum class OtpLoginStep {
     PROFILE_SETUP
 }
 
+typealias LoginStep = OtpLoginStep
+
 data class LoginFlowState(
     val step: OtpLoginStep = OtpLoginStep.PHONE_ENTRY,
     val phone: String = "",
@@ -44,6 +46,7 @@ data class LoginFlowState(
     val avatarUrl: String? = null,
     val localAvatarPreviewUri: String? = null,
     val isAvatarUploading: Boolean = false,
+    val telegramBotUrl: String? = null,
     val resendCountdownSeconds: Int = 0,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
@@ -139,15 +142,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val result = repository.sendOtp(normalizedPhone)
             result.onSuccess { resp ->
+                val resolvedBotUrl = resp.resolvedTelegramBotUrl() ?: _loginFlowState.value.telegramBotUrl
                 _loginFlowState.update {
                     it.copy(
                         step = OtpLoginStep.OTP_VERIFICATION,
+                        telegramBotUrl = resolvedBotUrl,
                         isLoading = false,
+                        errorMessage = null,
                         infoMessage = resp.message?.takeIf { msg -> msg.isNotBlank() }
-                            ?: "OTP sent to your WhatsApp number ($normalizedPhone) and admin relay."
+                            ?: "OTP sent to your WhatsApp number ($normalizedPhone)."
                     )
                 }
-                startOtpCountdown(resp.expiresInSeconds.coerceIn(30, 120))
+                startOtpCountdown(resp.resolvedExpiresInSeconds().coerceIn(30, 120))
             }.onFailure { err ->
                 _loginFlowState.update {
                     it.copy(
@@ -169,19 +175,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.verifyOtp(normalizedPhone, cleanOtp)
             result.onSuccess { resp ->
                 countdownJob?.cancel()
-                val derivedId = resp.userId?.takeIf { it.isNotBlank() }
+                val derivedId = resp.resolvedUserId()
                     ?: ("u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone })
                 _loginFlowState.update {
                     it.copy(
                         step = OtpLoginStep.PROFILE_SETUP,
                         phone = normalizedPhone,
                         verifiedUserId = derivedId,
-                        verifiedToken = resp.token,
-                        prefilledName = resp.displayName.orEmpty(),
-                        avatarUrl = resp.avatarUrl,
+                        verifiedToken = resp.resolvedToken(),
+                        prefilledName = resp.resolvedDisplayName().orEmpty(),
+                        avatarUrl = resp.resolvedAvatarUrl(),
+                        telegramBotUrl = null,
                         isLoading = false,
                         errorMessage = null,
-                        infoMessage = "Phone verified. Complete your profile."
+                        infoMessage = "Phone verified! Enter your display name to continue."
                     )
                 }
             }.onFailure { err ->
@@ -200,6 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _loginFlowState.update {
             it.copy(
                 step = OtpLoginStep.PHONE_ENTRY,
+                telegramBotUrl = null,
                 resendCountdownSeconds = 0,
                 errorMessage = null,
                 infoMessage = null

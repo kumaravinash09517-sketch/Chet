@@ -12,9 +12,40 @@ data class SendOtpRequest(
 @JsonClass(generateAdapter = true)
 data class SendOtpResponse(
     @Json(name = "success") val success: Boolean = true,
+    @Json(name = "status") val status: String? = null,
     @Json(name = "message") val message: String? = null,
-    @Json(name = "expiresInSeconds") val expiresInSeconds: Int = 60
-)
+    @Json(name = "expiresInSeconds") val expiresInSeconds: Int? = null,
+    @Json(name = "expires_in_seconds") val expiresInSecondsSnake: Int? = null,
+    @Json(name = "expires_in") val expiresInSnake: Int? = null,
+    @Json(name = "telegram_bot_url") val telegramBotUrl: String? = null,
+    @Json(name = "telegramBotUrl") val telegramBotUrlCamel: String? = null,
+    @Json(name = "bot_username") val botUsername: String? = null,
+    @Json(name = "botUsername") val botUsernameCamel: String? = null
+) {
+    fun resolvedExpiresInSeconds(): Int =
+        expiresInSeconds ?: expiresInSecondsSnake ?: expiresInSnake ?: 60
+
+    fun resolvedTelegramBotUrl(): String? {
+        val rawUrl = telegramBotUrl?.trim()?.takeIf { it.isNotBlank() }
+            ?: telegramBotUrlCamel?.trim()?.takeIf { it.isNotBlank() }
+        if (rawUrl != null) {
+            return if (
+                rawUrl.startsWith("http://", ignoreCase = true) ||
+                rawUrl.startsWith("https://", ignoreCase = true) ||
+                rawUrl.startsWith("tg://", ignoreCase = true)
+            ) {
+                rawUrl
+            } else {
+                "https://$rawUrl"
+            }
+        }
+        val username = (botUsername ?: botUsernameCamel)
+            ?.trim()
+            ?.removePrefix("@")
+            ?.takeIf { it.isNotBlank() }
+        return username?.let { "https://t.me/$it" }
+    }
+}
 
 @JsonClass(generateAdapter = true)
 data class VerifyOtpRequest(
@@ -26,12 +57,84 @@ data class VerifyOtpRequest(
 @JsonClass(generateAdapter = true)
 data class VerifyOtpResponse(
     @Json(name = "success") val success: Boolean = true,
+    @Json(name = "verified") val verified: Boolean? = null,
+    @Json(name = "status") val status: String? = null,
+    @Json(name = "requires_profile") val requiresProfile: Boolean? = null,
+    @Json(name = "requires_name") val requiresName: Boolean? = null,
+    @Json(name = "needs_profile") val needsProfile: Boolean? = null,
+    @Json(name = "needs_name") val needsName: Boolean? = null,
+    @Json(name = "needs_registration") val needsRegistration: Boolean? = null,
+    @Json(name = "is_new_user") val isNewUser: Boolean? = null,
     @Json(name = "token") val token: String? = null,
+    @Json(name = "access_token") val accessToken: String? = null,
     @Json(name = "userId") val userId: String? = null,
+    @Json(name = "user_id") val userIdSnake: String? = null,
     @Json(name = "displayName") val displayName: String? = null,
+    @Json(name = "display_name") val displayNameSnake: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
+    @Json(name = "user") val user: RemoteUserDto? = null,
     @Json(name = "message") val message: String? = null
-)
+) {
+    fun resolvedToken(): String? =
+        token?.takeIf { it.isNotBlank() } ?: accessToken?.takeIf { it.isNotBlank() }
+
+    fun resolvedUserId(): String? =
+        userId?.takeIf { it.isNotBlank() }
+            ?: userIdSnake?.takeIf { it.isNotBlank() }
+            ?: user?.userId?.takeIf { it.isNotBlank() }
+
+    fun resolvedDisplayName(): String? =
+        displayName?.takeIf { it.isNotBlank() }
+            ?: displayNameSnake?.takeIf { it.isNotBlank() }
+            ?: user?.displayName?.takeIf { it.isNotBlank() }
+
+    fun resolvedAvatarUrl(): String? =
+        avatarUrl?.takeIf { it.isNotBlank() }
+            ?: avatarUrlSnake?.takeIf { it.isNotBlank() }
+            ?: user?.avatarUrl?.takeIf { it.isNotBlank() }
+
+    fun isOtpVerified(): Boolean {
+        if (verified == true) return true
+        if (requiresProfile == true ||
+            requiresName == true ||
+            needsProfile == true ||
+            needsName == true ||
+            needsRegistration == true ||
+            isNewUser == true
+        ) {
+            return true
+        }
+        val normalizedStatus = status?.trim()?.lowercase()
+        if (normalizedStatus in setOf(
+                "ok",
+                "success",
+                "verified",
+                "profile_required",
+                "requires_profile",
+                "requires_name",
+                "needs_profile",
+                "needs_name",
+                "needs_registration",
+                "new_user"
+            )
+        ) {
+            return true
+        }
+        if (verified == false) return false
+        if (success) return true
+
+        val lowerMsg = message?.trim()?.lowercase().orEmpty()
+        val asksForProfile = (lowerMsg.contains("name") || lowerMsg.contains("profile") || lowerMsg.contains("register")) &&
+            !lowerMsg.contains("invalid") &&
+            !lowerMsg.contains("expired") &&
+            !lowerMsg.contains("incorrect") &&
+            !lowerMsg.contains("wrong") &&
+            !lowerMsg.contains("mismatch") &&
+            !lowerMsg.contains("otp")
+        return asksForProfile
+    }
+}
 
 @JsonClass(generateAdapter = true)
 data class RegisterUserRequest(

@@ -232,8 +232,8 @@ class ChatRepository(
                     )
                     return@withContext Result.failure(IllegalStateException(errorMsg))
                 }
-                val body = response.body() ?: VerifyOtpResponse(success = false, message = "Empty server response")
-                if (!body.success) {
+                val body = response.body() ?: VerifyOtpResponse(success = true)
+                if (!body.isOtpVerified()) {
                     Result.failure(IllegalStateException(body.message ?: "Invalid OTP code."))
                 } else {
                     Result.success(body)
