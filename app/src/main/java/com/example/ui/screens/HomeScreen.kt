@@ -27,12 +27,17 @@ import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.PersonSearch
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -52,10 +57,12 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,12 +79,23 @@ import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageStatus
 import com.example.data.local.UserEntity
+import com.example.data.remote.RetrofitClient
 import com.example.platform.DeviceContact
 import com.example.ui.theme.OnlineGreen
 import com.example.ui.theme.ReadCheckEmerald
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private data class FoundPhoneUser(
+    val userId: String,
+    val displayName: String,
+    val phone: String
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,6 +119,11 @@ fun HomeScreen(
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showContactSheet by remember { mutableStateOf(false) }
     var showContactRationale by remember { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+    var foundRemoteUser by remember { mutableStateOf<FoundPhoneUser?>(null) }
+    var searchingByPhone by remember { mutableStateOf(false) }
+    var phoneSearchNotFound by remember { mutableStateOf(false) }
 
     val contactPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -126,6 +149,49 @@ fun HomeScreen(
         else othersFirst.filter {
             it.displayName.contains(searchQuery, ignoreCase = true) ||
                 it.userId.contains(searchQuery, ignoreCase = true)
+        }
+    }
+
+    // फोन नंबर डालते ही सर्वर से यूजर ढूँढना
+    LaunchedEffect(searchQuery) {
+        val digitsOnly = searchQuery.filter { it.isDigit() }
+        foundRemoteUser = null
+        phoneSearchNotFound = false
+        if (digitsOnly.length >= 6) {
+            searchingByPhone = true
+            delay(350)
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    RetrofitClient.api.findUser(phone = digitsOnly)
+                }
+                if (res.isSuccessful) {
+                    val body = res.body()
+                    val found = body?.get("found") == true || body?.get("user_id") != null
+                    if (found) {
+                        val userMap = (body?.get("user") as? Map<*, *>) ?: body
+                        val uid = userMap?.get("user_id")?.toString()
+                            ?: userMap?.get("id")?.toString()
+                            ?: digitsOnly
+                        val uname = userMap?.get("name")?.toString()
+                            ?: userMap?.get("display_name")?.toString()
+                            ?: "User ($digitsOnly)"
+                        val uphone = userMap?.get("phone")?.toString() ?: digitsOnly
+                        foundRemoteUser = FoundPhoneUser(
+                            userId = uid,
+                            displayName = uname,
+                            phone = uphone
+                        )
+                    } else {
+                        phoneSearchNotFound = true
+                    }
+                }
+            } catch (_: Exception) {
+                // नेटवर्क त्रुटि होने पर क्रैश नहीं होगा
+            } finally {
+                searchingByPhone = false
+            }
+        } else {
+            searchingByPhone = false
         }
     }
 
@@ -164,7 +230,6 @@ fun HomeScreen(
                             contentDescription = "Sync Directory"
                         )
                     }
-                    // Hidden settings trigger: tapping user's profile avatar opens ProfileSettingsScreen
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primaryContainer,
@@ -272,7 +337,10 @@ fun HomeScreen(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
                 placeholder = {
-                    Text(if (selectedTab == 0) "Search chats…" else "Search registered users…")
+                    Text(
+                        if (selectedTab == 0) "Search chats or phone number…"
+                        else "Search users or phone number…"
+                    )
                 },
                 leadingIcon = {
                     Icon(Icons.Rounded.Search, contentDescription = "Search")
@@ -285,11 +353,78 @@ fun HomeScreen(
                     .testTag("home_search_input")
             )
 
+            // फोन नंबर सर्च रिजल्ट कार्ड (यदि मिला हो तो सीधे ID खोलने के लिए)
+            if (searchingByPhone) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("फोन नंबर से आईडी खोज रहे हैं…", style = MaterialTheme.typography.bodySmall)
+                }
+            } else if (foundRemoteUser != null) {
+                val target = foundRemoteUser!!
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clickable { onOpenChat(target.userId, target.displayName) }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PersonSearch,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = target.displayName,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Phone: ${target.phone} • ID: ${target.userId}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                        Button(onClick = { onOpenChat(target.userId, target.displayName) }) {
+                            Text("Chat")
+                        }
+                    }
+                }
+            } else if (phoneSearchNotFound && searchQuery.filter { it.isDigit() }.length >= 10) {
+                Text(
+                    text = "इस नंबर से कोई आईडी नहीं मिली।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                )
+            }
+
             if (selectedTab == 0) {
                 if (filteredConversations.isEmpty()) {
                     EmptyHomeState(
                         title = "No conversations yet",
-                        subtitle = "Open the Directory tab or tap the Contact Picker button to start an encrypted chat or WebRTC call."
+                        subtitle = "Open the Directory tab, search a phone number, or tap the Contact Picker button to start chatting."
                     )
                 } else {
                     LazyColumn(
@@ -380,6 +515,11 @@ fun HomeScreen(
                     val target = contact.matchedDirectoryUser
                     if (target != null) {
                         onOpenChat(target.userId, target.displayName)
+                    } else {
+                        val digits = contact.phoneNumber.filter { it.isDigit() }
+                        if (digits.isNotEmpty()) {
+                            onOpenChat(digits, contact.name)
+                        }
                     }
                 }
             )
