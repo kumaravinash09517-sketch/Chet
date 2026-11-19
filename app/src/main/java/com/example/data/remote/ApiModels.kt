@@ -124,14 +124,30 @@ data class VerifyOtpResponse(
         if (verified == false) return false
         if (success) return true
 
-        val lowerMsg = message?.trim()?.lowercase().orEmpty()
-        val asksForProfile = (lowerMsg.contains("name") || lowerMsg.contains("profile") || lowerMsg.contains("register")) &&
-            !lowerMsg.contains("invalid") &&
-            !lowerMsg.contains("expired") &&
-            !lowerMsg.contains("incorrect") &&
-            !lowerMsg.contains("wrong") &&
-            !lowerMsg.contains("mismatch") &&
-            !lowerMsg.contains("otp")
+        val rawMsg = message?.trim().orEmpty()
+        val lowerMsg = rawMsg.lowercase()
+        val isOtpFailure = listOf(
+            "invalid",
+            "expired",
+            "incorrect",
+            "wrong",
+            "mismatch",
+            "invalid otp",
+            "wrong otp",
+            "गलत",
+            "अमान्य",
+            "एक्सपायर",
+            "समाप्त"
+        ).any { lowerMsg.contains(it) }
+        if (isOtpFailure) return false
+
+        val asksForProfile = lowerMsg.contains("name") ||
+            lowerMsg.contains("profile") ||
+            lowerMsg.contains("register") ||
+            lowerMsg.contains("naam") ||
+            rawMsg.contains("नाम") ||
+            rawMsg.contains("प्रोफ़ाइल") ||
+            rawMsg.contains("प्रोफाइल")
         return asksForProfile
     }
 }

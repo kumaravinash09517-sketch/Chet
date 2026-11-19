@@ -180,6 +180,40 @@ class ExampleRobolectricTest {
             message = "Invalid OTP code"
         )
         org.junit.Assert.assertFalse(invalidOtp.isOtpVerified())
+
+        val hindiNamePrompt = com.example.data.remote.VerifyOtpResponse(
+            success = false,
+            message = "कृपया अपना नाम लिखें"
+        )
+        assertTrue(hindiNamePrompt.isOtpVerified())
+    }
+
+    @Test
+    fun `isProfileSetupRequiredError detects 400 name prompts but rejects wrong OTP errors`() {
+        assertTrue(
+            com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(
+                rawErrorBody = """{"detail":"कृपया अपना नाम लिखें..."}""",
+                parsedMessage = "कृपया अपना नाम लिखें..."
+            )
+        )
+        assertTrue(
+            com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(
+                rawErrorBody = """{"verified":true,"requires_profile":true,"message":"Display name required"}""",
+                parsedMessage = "Display name required"
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(
+                rawErrorBody = """{"detail":"Invalid or expired OTP"}""",
+                parsedMessage = "Invalid or expired OTP"
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(
+                rawErrorBody = """{"detail":"OTP गलत है"}""",
+                parsedMessage = "OTP गलत है"
+            )
+        )
     }
 
     @Test

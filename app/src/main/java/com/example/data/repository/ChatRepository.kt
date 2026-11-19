@@ -89,6 +89,142 @@ object PhoneAuthUtils {
         }
         return "$fallback ($statusCode)"
     }
+
+    fun isProfileSetupRequiredError(rawErrorBody: String?, parsedMessage: String?): Boolean {
+        val raw = rawErrorBody?.trim().orEmpty()
+        if (raw.isNotEmpty()) {
+            try {
+                val json = JSONObject(raw)
+                val trueFlags = listOf(
+                    "verified",
+                    "otp_verified",
+                    "otpVerified",
+                    "requires_profile",
+                    "requiresProfile",
+                    "requires_name",
+                    "requiresName",
+                    "needs_profile",
+                    "needsProfile",
+                    "needs_name",
+                    "needsName",
+                    "needs_registration",
+                    "needsRegistration",
+                    "is_new_user",
+                    "isNewUser"
+                )
+                if (trueFlags.any { key -> json.optBoolean(key, false) }) {
+                    return true
+                }
+                val status = if (!json.isNull("status")) json.optString("status").trim().lowercase() else ""
+                if (status in setOf(
+                        "verified",
+                        "profile_required",
+                        "requires_profile",
+                        "requires_name",
+                        "needs_profile",
+                        "needs_name",
+                        "needs_registration",
+                        "new_user"
+                    )
+                ) {
+                    return true
+                }
+            } catch (_: Exception) {
+                // Non-JSON body handled by text heuristic below
+            }
+        }
+
+        val combined = listOfNotNull(parsedMessage, raw)
+            .joinToString(" ")
+            .trim()
+        if (combined.isBlank()) return false
+
+        val lower = combined.lowercase(Locale.ROOT)
+        val otpFailureTokens = listOf(
+            "invalid otp",
+            "wrong otp",
+            "incorrect otp",
+            "expired",
+            "otp not found",
+            "otp mismatch",
+            "invalid code",
+            "wrong code",
+            "incorrect code",
+            "too many attempts",
+            "blocked",
+            "banned",
+            "गलत",
+            "अमान्य",
+            "एक्सपायर",
+            "समाप्त"
+        )
+        if (otpFailureTokens.any { lower.contains(it) }) {
+            return false
+        }
+
+        val hindiOrHinglishIndicators = listOf(
+            "नाम",
+            "प्रोफ़ाइल",
+            "प्रोफाइल",
+            "naam"
+        )
+        if (hindiOrHinglishIndicators.any { combined.contains(it, ignoreCase = true) }) {
+            return true
+        }
+
+        val englishProfilePhrases = listOf(
+            "display name",
+            "displayname",
+            "display_name",
+            "full name",
+            "your name",
+            "enter name",
+            "name required",
+            "name is required",
+            "missing name",
+            "profile setup",
+            "complete profile",
+            "complete registration",
+            "new user"
+        )
+        if (englishProfilePhrases.any { lower.contains(it) }) {
+            return true
+        }
+
+        return Regex("\\bname\\b").containsMatchIn(lower)
+    }
+
+    fun buildProfileSetupResponseFromError(rawErrorBody: String?, parsedMessage: String?): VerifyOtpResponse {
+        var token: String? = null
+        var userId: String? = null
+        var displayName: String? = null
+        var avatarUrl: String? = null
+        if (!rawErrorBody.isNullOrBlank()) {
+            try {
+                val json = JSONObject(rawErrorBody)
+                token = listOf("token", "access_token")
+                    .firstNotNullOfOrNull { k -> if (!json.isNull(k)) json.optString(k).takeIf { it.isNotBlank() } else null }
+                userId = listOf("userId", "user_id")
+                    .firstNotNullOfOrNull { k -> if (!json.isNull(k)) json.optString(k).takeIf { it.isNotBlank() } else null }
+                displayName = listOf("displayName", "display_name")
+                    .firstNotNullOfOrNull { k -> if (!json.isNull(k)) json.optString(k).takeIf { it.isNotBlank() } else null }
+                avatarUrl = listOf("avatarUrl", "avatar_url")
+                    .firstNotNullOfOrNull { k -> if (!json.isNull(k)) json.optString(k).takeIf { it.isNotBlank() } else null }
+            } catch (_: Exception) {
+                // Ignore JSON parse fallback
+            }
+        }
+        return VerifyOtpResponse(
+            success = true,
+            verified = true,
+            requiresProfile = true,
+            token = token,
+            userId = userId,
+            displayName = displayName,
+            avatarUrl = avatarUrl,
+            message = parsedMessage
+        )
+    }
 }
 
 class ChatRepository(
@@ -225,11 +361,19 @@ class ChatRepository(
                     return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
                 }
                 if (!response.isSuccessful) {
+                    val rawError = response.errorBody()?.string()
                     val errorMsg = PhoneAuthUtils.parseApiErrorMessage(
-                        rawErrorBody = response.errorBody()?.string(),
+                        rawErrorBody = rawError,
                         statusCode = response.code(),
                         fallback = "OTP verification failed"
                     )
+                    if ((response.code() == 400 || response.code() == 422) &&
+                        PhoneAuthUtils.isProfileSetupRequiredError(rawError, errorMsg)
+                    ) {
+                        return@withContext Result.success(
+                            PhoneAuthUtils.buildProfileSetupResponseFromError(rawError, errorMsg)
+                        )
+                    }
                     return@withContext Result.failure(IllegalStateException(errorMsg))
                 }
                 val body = response.body() ?: VerifyOtpResponse(success = true)

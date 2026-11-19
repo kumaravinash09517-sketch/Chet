@@ -192,11 +192,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onFailure { err ->
-                _loginFlowState.update {
-                    it.copy(
-                        isLoading = false,
-                        errorMessage = err.message ?: "Invalid OTP code."
-                    )
+                if (com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(null, err.message)) {
+                    countdownJob?.cancel()
+                    val derivedId = "u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone }
+                    _loginFlowState.update {
+                        it.copy(
+                            step = OtpLoginStep.PROFILE_SETUP,
+                            phone = normalizedPhone,
+                            verifiedUserId = derivedId,
+                            telegramBotUrl = null,
+                            isLoading = false,
+                            errorMessage = null,
+                            infoMessage = "Phone verified! Enter your display name to continue."
+                        )
+                    }
+                } else {
+                    _loginFlowState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = err.message ?: "Invalid OTP code."
+                        )
+                    }
                 }
             }
         }
