@@ -49,6 +49,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var activePeerName: String = ""
     private var activeIsVideo: Boolean = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
+    private var attachedLocalRenderer: SurfaceViewRenderer? = null
+    private var attachedRemoteRenderer: SurfaceViewRenderer? = null
     private var timerJob: Job? = null
 
     init {
@@ -80,6 +82,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         if (current is CallState.OutgoingRinging && event.callerId == current.peerId) {
                             webRTCClient?.handleRemoteAnswer(event.sdp)
                             drainPendingIce()
+                            syncRenderersToClient()
                             transitionToConnected(current.peerId, current.peerName, current.isVideo)
                         }
                     }
@@ -127,6 +130,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             val iceServers = repository.fetchIceServers()
             val client = ensureWebRtcClient()
             client.startPeerConnection(isVideo = isVideo, customIceServers = iceServers)
+            syncRenderersToClient()
             client.createOffer(isVideo)
         }
     }
@@ -148,6 +152,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             val iceServers = repository.fetchIceServers()
             val client = ensureWebRtcClient()
             client.startPeerConnection(isVideo = incoming.isVideo, customIceServers = iceServers)
+            syncRenderersToClient()
             client.handleRemoteOfferAndCreateAnswer(incoming.offerSdp, incoming.isVideo)
             drainPendingIce()
             transitionToConnected(incoming.callerId, incoming.callerName, incoming.isVideo)
@@ -203,8 +208,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        runCatching { webRTCClient?.attachRenderers(null, null) }
         webRTCClient?.release()
         webRTCClient = null
+        attachedLocalRenderer = null
+        attachedRemoteRenderer = null
         stopActiveCallForegroundService()
         activePeerId = ""
         pendingRemoteIce.clear()
@@ -219,7 +227,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun attachRenderers(local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) {
-        webRTCClient?.attachRenderers(local, remote)
+        attachedLocalRenderer = local
+        attachedRemoteRenderer = remote
+        syncRenderersToClient()
+    }
+
+    private fun syncRenderersToClient() {
+        val client = webRTCClient ?: return
+        if (activeIsVideo) {
+            client.attachRenderers(attachedLocalRenderer, attachedRemoteRenderer)
+        } else {
+            client.attachRenderers(null, null)
+        }
     }
 
     fun toggleMute() {
@@ -238,6 +257,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         val next = !_isVideoEnabled.value
         _isVideoEnabled.value = next
         webRTCClient?.setVideoEnabled(next)
+        if (next) {
+            syncRenderersToClient()
+        }
     }
 
     fun switchCamera() {
@@ -285,6 +307,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             },
             onConnectionStateChanged = { iceState ->
                 if (iceState == PeerConnection.IceConnectionState.CONNECTED) {
+                    syncRenderersToClient()
                     transitionToConnected(activePeerId, activePeerName, activeIsVideo)
                 } else if (iceState == PeerConnection.IceConnectionState.FAILED ||
                     iceState == PeerConnection.IceConnectionState.DISCONNECTED
@@ -292,7 +315,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     endCallLocally(sendSignal = false, reason = "Connection lost")
                 }
             },
-            onRemoteVideoTrack = { /* Bound directly to remote SurfaceViewRenderer */ }
+            onRemoteVideoTrack = { syncRenderersToClient() }
         )
         webRTCClient = client
         return client
@@ -336,6 +359,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        runCatching { webRTCClient?.attachRenderers(null, null) }
         webRTCClient?.release()
         NotificationHelper.stopRingtoneAndVibrate(app)
         super.onCleared()
