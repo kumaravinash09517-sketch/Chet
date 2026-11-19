@@ -195,8 +195,7 @@ private fun HelloSirRoot(
                     errorMessage = loginError,
                     serverStatus = serverStatus,
                     onSubmit = { id, name, phone, deviceId, avatarUrl ->
-                        mainViewModel.registerAndLogin(id, name)
-                        // यदि MainViewModel में फोन/डिवाइस/फोटो सेव करने का मेथड है तो यहाँ कॉल करें
+                        mainViewModel.registerAndLogin(id, name, phone, deviceId, avatarUrl)
                     },
                     onClearError = { mainViewModel.clearLoginError() }
                 )
