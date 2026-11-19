@@ -10,16 +10,13 @@ import com.example.core.security.ServerStatus
 import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.UserEntity
-import com.example.data.remote.RetrofitClient
 import com.example.platform.DeviceContact
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 sealed interface AuthUiState {
     data object Loading : AuthUiState
@@ -108,22 +105,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _loginError.value = null
             _loginLoading.value = true
             val result = repository.registerOrLogin(userId, displayName)
-            result.onSuccess {
-                val payload = buildMap<String, Any> {
-                    put("user_id", userId)
-                    put("name", displayName)
-                    if (phone.isNotBlank()) put("phone", phone)
-                    if (deviceId.isNotBlank()) put("device_id", deviceId)
-                    if (avatarUrl.isNotBlank()) put("avatar_url", avatarUrl)
-                }
-                if (payload.size > 2) {
-                    runCatching {
-                        withContext(Dispatchers.IO) {
-                            RetrofitClient.api.updateProfile(payload)
-                        }
-                    }
-                }
-            }
             _loginLoading.value = false
             result.onFailure { err ->
                 _loginError.value = err.message ?: "Unable to register on server."
