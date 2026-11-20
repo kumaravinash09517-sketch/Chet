@@ -18,6 +18,9 @@ interface ApiService {
     @GET("api/health")
     suspend fun pingHealth(): Response<BasicSuccessResponse>
 
+    @POST("api/auth/login")
+    suspend fun loginDirect(@Body request: DirectLoginRequest): Response<DirectLoginResponse>
+
     @POST("api/auth/send-otp")
     suspend fun sendOtp(@Body request: SendOtpRequest): Response<SendOtpResponse>
 

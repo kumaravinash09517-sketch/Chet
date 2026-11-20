@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.example.core.security.GlobalSecurityEventBus
+import com.example.core.security.IncomingMessageAlert
 import com.example.core.security.ServerStatus
 import com.example.core.security.SessionManager
 import com.example.core.security.UserSession
@@ -16,6 +17,7 @@ import com.example.data.local.UserEntity
 import com.example.data.remote.AdminWebhookEventRequest
 import com.example.data.remote.ApiService
 import com.example.data.remote.BackendJsonParsers
+import com.example.data.remote.DirectLoginRequest
 import com.example.data.remote.IceServerDto
 import com.example.data.remote.RegisterUserRequest
 import com.example.data.remote.RemoteMessageDto
@@ -508,7 +510,7 @@ class ChatRepository(
                     senderId = senderHint.toRequestBody("text/plain".toMediaTypeOrNull())
                 )
                 if (resp.isSuccessful) {
-                    val url = resp.body()?.url
+                    val url = resp.body()?.resolvedUrl()
                     if (!url.isNullOrBlank()) {
                         Result.success(url)
                     } else {
@@ -521,6 +523,137 @@ class ChatRepository(
                 Result.failure(e)
             }
         }
+
+    suspend fun loginDirect(
+        userId: String,
+        displayName: String,
+        avatarUrl: String? = null,
+        deviceId: String = ""
+    ): Result<UserSession> = withContext(Dispatchers.IO) {
+        val cleanName = displayName.trim()
+        val cleanId = userId.trim().replace(" ", "_")
+        if (cleanName.isBlank() || cleanId.isBlank()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Username and User ID are required.")
+            )
+        }
+        if (!sessionManager.canRegisterUser(cleanId, "")) {
+            return@withContext Result.failure(
+                IllegalStateException("This device is locked to another registered account.")
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        val formatted = formatDateTime(now)
+        val hardwareDeviceId = sessionManager.getOrCreateDeviceLockId()
+        val effectiveDeviceId = deviceId.trim().ifBlank { hardwareDeviceId }
+
+        return@withContext try {
+            val response = apiService.loginDirect(
+                DirectLoginRequest(
+                    userId = cleanId,
+                    username = cleanName,
+                    displayName = cleanName,
+                    deviceId = effectiveDeviceId,
+                    deviceLockId = hardwareDeviceId,
+                    avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
+                    loginTimestamp = now,
+                    loginDateFormatted = formatted
+                )
+            )
+
+            if (response.code() == 403) {
+                GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+            }
+
+            if (response.isSuccessful) {
+                val body = response.body()
+                if (body?.resolvedIsBlocked() == true) {
+                    GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                    return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+                }
+
+                val finalUserId = body?.resolvedUserId()?.takeIf { it.isNotBlank() } ?: cleanId
+                val finalDisplayName = body?.resolvedDisplayName()?.takeIf { it.isNotBlank() } ?: cleanName
+                val finalPhone = body?.resolvedPhone().orEmpty()
+                if (!sessionManager.canRegisterUser(finalUserId, finalPhone)) {
+                    return@withContext Result.failure(
+                        IllegalStateException("This device is locked to another registered account.")
+                    )
+                }
+
+                val resolvedAvatar = body?.resolvedAvatarUrl() ?: BackendJsonParsers.normalizeMediaUrl(avatarUrl)
+                val session = sessionManager.saveSession(
+                    userId = finalUserId,
+                    displayName = finalDisplayName,
+                    phone = finalPhone,
+                    avatarUrl = resolvedAvatar,
+                    serverToken = body?.resolvedToken(),
+                    registeredAtMillis = now,
+                    registeredAtFormatted = formatted,
+                    deviceIdOverride = effectiveDeviceId
+                )
+
+                userDao.upsertUser(
+                    UserEntity(
+                        userId = finalUserId,
+                        displayName = finalDisplayName,
+                        phone = finalPhone,
+                        avatarUrl = resolvedAvatar,
+                        lastLoginMillis = now,
+                        lastLoginFormatted = formatted,
+                        isOnline = true
+                    )
+                )
+
+                runCatching {
+                    apiService.sendAdminWebhook(
+                        AdminWebhookEventRequest(
+                            eventType = "USER_LOGIN",
+                            userId = finalUserId,
+                            displayName = finalDisplayName,
+                            timestamp = now,
+                            summary = "User $finalDisplayName (@$finalUserId) logged in at $formatted"
+                        )
+                    )
+                }
+
+                signalingClient.connect()
+                syncUserDirectory()
+                return@withContext Result.success(session)
+            }
+
+            val code = response.code()
+            val rawError = response.errorBody()?.string()
+            // Fall back to /api/users/register if /api/auth/login is unavailable or user is new
+            if (code in setOf(400, 404, 405, 422, 501)) {
+                return@withContext registerOrLogin(
+                    userId = cleanId,
+                    displayName = cleanName,
+                    phone = "",
+                    deviceId = effectiveDeviceId,
+                    avatarUrl = avatarUrl
+                )
+            }
+
+            val errorMsg = PhoneAuthUtils.parseApiErrorMessage(
+                rawErrorBody = rawError,
+                statusCode = code,
+                fallback = "Login failed"
+            )
+            Result.failure(IllegalStateException(errorMsg))
+        } catch (e: Exception) {
+            // Attempt /api/users/register fallback on transient serialization/path mismatch if needed
+            registerOrLogin(
+                userId = cleanId,
+                displayName = cleanName,
+                phone = "",
+                deviceId = effectiveDeviceId,
+                avatarUrl = avatarUrl
+            )
+        }
+    }
 
     suspend fun registerOrLogin(
         userId: String,
@@ -664,7 +797,15 @@ class ChatRepository(
             val response = apiService.getUserDirectory()
             if (response.isSuccessful) {
                 val rawBody = response.body()?.string()
-                val remoteUsers = BackendJsonParsers.parseUsersFromBody(rawBody)
+                var remoteUsers = BackendJsonParsers.parseUsersFromBody(rawBody)
+                if (remoteUsers.isEmpty()) {
+                    runCatching {
+                        val fallbackResp = apiService.findUsers("")
+                        if (fallbackResp.isSuccessful) {
+                            remoteUsers = BackendJsonParsers.parseUsersFromBody(fallbackResp.body()?.string())
+                        }
+                    }
+                }
                 val mapped = remoteUsers.mapNotNull { it.toUserEntity() }
                 val currentSession = sessionManager.getCurrentSession()
                 if (currentSession != null &&
@@ -673,23 +814,28 @@ class ChatRepository(
                     GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                 }
 
-                val mergedUsers = mapped.toMutableList()
-                if (currentSession != null &&
-                    mergedUsers.none { it.userId.equals(currentSession.userId, ignoreCase = true) }
-                ) {
-                    mergedUsers.add(
-                        UserEntity(
-                            userId = currentSession.userId,
-                            displayName = currentSession.displayName,
-                            phone = currentSession.phone,
-                            avatarUrl = currentSession.avatarUrl,
-                            lastLoginMillis = currentSession.registeredAtMillis,
-                            lastLoginFormatted = currentSession.registeredAtFormatted,
-                            isOnline = true
-                        )
+                val mergedMap = linkedMapOf<String, UserEntity>()
+                mapped.forEach { user ->
+                    mergedMap[user.userId.lowercase(Locale.ROOT)] = user
+                }
+                if (currentSession != null) {
+                    val selfKey = currentSession.userId.lowercase(Locale.ROOT)
+                    val existingSelf = mergedMap[selfKey]
+                    mergedMap[selfKey] = UserEntity(
+                        userId = existingSelf?.userId ?: currentSession.userId,
+                        displayName = currentSession.displayName.ifBlank { existingSelf?.displayName ?: currentSession.userId },
+                        phone = currentSession.phone.ifBlank { existingSelf?.phone.orEmpty() },
+                        avatarUrl = currentSession.avatarUrl ?: existingSelf?.avatarUrl,
+                        lastLoginMillis = maxOf(currentSession.registeredAtMillis, existingSelf?.lastLoginMillis ?: 0L),
+                        lastLoginFormatted = currentSession.registeredAtFormatted.ifBlank {
+                            existingSelf?.lastLoginFormatted ?: formatDateTime(System.currentTimeMillis())
+                        },
+                        isOnline = true,
+                        isBlocked = existingSelf?.isBlocked ?: false
                     )
                 }
 
+                val mergedUsers = mergedMap.values.toList()
                 if (mergedUsers.isNotEmpty()) {
                     userDao.upsertUsers(mergedUsers)
                     mergedUsers.forEach { user ->
@@ -805,16 +951,22 @@ class ChatRepository(
             if (response.isSuccessful) {
                 val remoteMessages = BackendJsonParsers.parseMessagesFromBody(response.body()?.string())
                 if (remoteMessages.isNotEmpty()) {
+                    val prevConv = conversationDao.getConversation(peerId)
+                    val prevLastTs = prevConv?.lastMessageTimestamp ?: 0L
+                    val newlyReceivedFromPeer = mutableListOf<MessageEntity>()
+
                     val entities = remoteMessages.map { dto ->
                         val incoming = dto.toEntity(conversationId = peerId)
                         val existing = messageDao.getMessageById(incoming.id)
                         if (existing != null) {
-                            val higherStatus = maxStatus(existing.status, incoming.status)
-                            incoming.copy(
-                                status = higherStatus,
-                                localUri = existing.localUri ?: incoming.localUri
-                            )
+                            mergeMessageEntities(existing, incoming)
                         } else {
+                            if (prevConv != null &&
+                                !incoming.senderId.equals(myId, ignoreCase = true) &&
+                                incoming.timestamp > prevLastTs
+                            ) {
+                                newlyReceivedFromPeer.add(incoming)
+                            }
                             incoming
                         }
                     }
@@ -835,9 +987,23 @@ class ChatRepository(
                                 lastMessageType = latest.type,
                                 lastMessageTimestamp = latest.timestamp,
                                 lastMessageStatus = latest.status,
-                                lastMessageIsMine = latest.senderId == myId,
+                                lastMessageIsMine = latest.senderId.equals(myId, ignoreCase = true),
                                 unreadCount = existing?.unreadCount ?: 0,
                                 isPeerTyping = existing?.isPeerTyping ?: false
+                            )
+                        )
+                    }
+
+                    newlyReceivedFromPeer.maxByOrNull { it.timestamp }?.let { newest ->
+                        val peerUser = userDao.getUser(peerId)
+                        val resolvedName = peerUser?.displayName ?: prevConv?.peerName ?: peerId
+                        GlobalSecurityEventBus.emitIncomingMessageAlert(
+                            IncomingMessageAlert(
+                                messageId = newest.id,
+                                peerId = peerId,
+                                senderName = resolvedName,
+                                headline = previewForMessage(newest),
+                                timestamp = newest.timestamp
                             )
                         )
                     }
@@ -865,16 +1031,23 @@ class ChatRepository(
         caption: String = ""
     ) = withContext(Dispatchers.IO) {
         val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
         val (fileName, fileSize) = queryUriMetadata(uri)
         val messageId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        val cleanContent = caption.trim()
 
         val pendingEntity = MessageEntity(
             id = messageId,
             conversationId = peerId,
             senderId = myId,
             receiverId = peerId,
-            content = caption,
+            content = cleanContent,
             type = type,
             localUri = uri.toString(),
             fileName = fileName,
@@ -900,7 +1073,7 @@ class ChatRepository(
                     senderId = myId.toRequestBody("text/plain".toMediaTypeOrNull())
                 )
                 if (uploadResp.isSuccessful) {
-                    uploadedUrl = uploadResp.body()?.url
+                    uploadedUrl = uploadResp.body()?.resolvedUrl()
                 }
             }
         } catch (_: Exception) {
@@ -908,6 +1081,7 @@ class ChatRepository(
         }
 
         val updatedEntity = pendingEntity.copy(mediaUrl = uploadedUrl)
+        messageDao.upsertMessage(updatedEntity)
         dispatchOutgoingMessage(updatedEntity, peerName)
     }
 
@@ -1139,24 +1313,39 @@ class ChatRepository(
     }
 
     private suspend fun handleIncomingMessage(dto: RemoteMessageDto, myId: String) {
-        val peerId = if (dto.senderId == myId) dto.receiverId else dto.senderId
-        val isMine = dto.senderId == myId
-        val entity = dto.toEntity(conversationId = peerId)
+        val isMine = dto.senderId.equals(myId, ignoreCase = true)
+        val peerId = if (isMine) dto.receiverId else dto.senderId
+        if (peerId.isBlank()) return
+
+        val incoming = dto.toEntity(conversationId = peerId)
+        val existingMsg = messageDao.getMessageById(incoming.id)
+        val entity = if (existingMsg != null) mergeMessageEntities(existingMsg, incoming) else incoming
         messageDao.upsertMessage(entity)
 
-        val peerUser = userDao.getUser(peerId)
+        var peerUser = userDao.getUser(peerId)
+        if (peerUser == null && !isMine) {
+            // Immediately ensure unknown senders appear in Directory too
+            syncUserDirectory()
+            peerUser = userDao.getUser(peerId)
+        }
         val existingConv = conversationDao.getConversation(peerId)
+        val resolvedPeerName = existingConv?.peerName
+            ?.takeIf { it.isNotBlank() && it != peerId }
+            ?: peerUser?.displayName?.takeIf { it.isNotBlank() }
+            ?: dto.senderName?.takeIf { it.isNotBlank() }
+            ?: peerId
         val newUnread = if (isMine) 0 else (existingConv?.unreadCount ?: 0) + 1
+        val headline = previewForMessage(entity)
 
         conversationDao.upsertConversation(
             ConversationEntity(
                 peerId = peerId,
-                peerName = existingConv?.peerName ?: peerUser?.displayName ?: peerId,
+                peerName = resolvedPeerName,
                 peerPhone = existingConv?.peerPhone?.ifBlank { peerUser?.phone.orEmpty() }
                     ?: peerUser?.phone.orEmpty(),
                 peerAvatarUrl = existingConv?.peerAvatarUrl ?: peerUser?.avatarUrl,
                 lastMessageId = entity.id,
-                lastMessagePreview = previewForMessage(entity),
+                lastMessagePreview = headline,
                 lastMessageType = entity.type,
                 lastMessageTimestamp = entity.timestamp,
                 lastMessageStatus = entity.status,
@@ -1166,7 +1355,16 @@ class ChatRepository(
             )
         )
 
-        if (!isMine) {
+        if (!isMine && existingMsg == null) {
+            GlobalSecurityEventBus.emitIncomingMessageAlert(
+                IncomingMessageAlert(
+                    messageId = entity.id,
+                    peerId = peerId,
+                    senderName = resolvedPeerName,
+                    headline = headline,
+                    timestamp = entity.timestamp
+                )
+            )
             signalingClient.sendReceipt(
                 senderId = myId,
                 receiverId = peerId,
@@ -1209,9 +1407,49 @@ class ChatRepository(
         sessionManager.clearSession()
     }
 
+    private fun mergeMessageEntities(existing: MessageEntity, incoming: MessageEntity): MessageEntity {
+        val resolvedType = if (incoming.type == MessageType.TEXT && existing.type != MessageType.TEXT) {
+            existing.type
+        } else {
+            incoming.type
+        }
+        return incoming.copy(
+            content = incoming.content.ifBlank { existing.content },
+            type = resolvedType,
+            mediaUrl = BackendJsonParsers.normalizeMediaUrl(incoming.mediaUrl)
+                ?: BackendJsonParsers.normalizeMediaUrl(existing.mediaUrl),
+            localUri = existing.localUri ?: incoming.localUri,
+            fileName = incoming.fileName ?: existing.fileName,
+            fileSizeBytes = incoming.fileSizeBytes ?: existing.fileSizeBytes,
+            latitude = incoming.latitude ?: existing.latitude,
+            longitude = incoming.longitude ?: existing.longitude,
+            liveLocationActive = existing.liveLocationActive || incoming.liveLocationActive,
+            status = maxStatus(existing.status, incoming.status),
+            timestamp = if (incoming.timestamp > 0L) incoming.timestamp else existing.timestamp
+        )
+    }
+
     private fun RemoteMessageDto.toEntity(conversationId: String): MessageEntity {
+        val normalizedUrl = BackendJsonParsers.normalizeMediaUrl(mediaUrl)
         val parsedType = runCatching { MessageType.valueOf(type.uppercase()) }
-            .getOrDefault(MessageType.TEXT)
+            .getOrElse {
+                when {
+                    latitude != null && longitude != null ->
+                        if (liveLocationActive) MessageType.LIVE_LOCATION else MessageType.LOCATION
+                    !normalizedUrl.isNullOrBlank() -> MessageType.IMAGE
+                    else -> MessageType.TEXT
+                }
+            }
+        val finalType = if (parsedType == MessageType.TEXT) {
+            when {
+                latitude != null && longitude != null ->
+                    if (liveLocationActive) MessageType.LIVE_LOCATION else MessageType.LOCATION
+                !normalizedUrl.isNullOrBlank() -> MessageType.IMAGE
+                else -> MessageType.TEXT
+            }
+        } else {
+            parsedType
+        }
         val parsedStatus = runCatching { MessageStatus.valueOf(status.uppercase()) }
             .getOrDefault(MessageStatus.SENT)
         return MessageEntity(
@@ -1220,8 +1458,8 @@ class ChatRepository(
             senderId = senderId,
             receiverId = receiverId,
             content = content,
-            type = parsedType,
-            mediaUrl = mediaUrl,
+            type = finalType,
+            mediaUrl = normalizedUrl,
             fileName = fileName,
             fileSizeBytes = fileSizeBytes,
             latitude = latitude,
@@ -1235,14 +1473,14 @@ class ChatRepository(
     private fun previewForMessage(message: MessageEntity): String {
         return when (message.type) {
             MessageType.TEXT -> message.content.ifBlank { "Message" }
-            MessageType.IMAGE -> "Photo"
-            MessageType.VIDEO -> "Video"
-            MessageType.AUDIO -> "Audio clip"
+            MessageType.IMAGE -> if (message.content.isNotBlank()) "Photo: ${message.content}" else "Photo"
+            MessageType.VIDEO -> message.fileName?.let { "Video: $it" } ?: "Video"
+            MessageType.AUDIO -> message.fileName?.let { "Audio: $it" } ?: "Audio clip"
             MessageType.DOCUMENT -> message.fileName ?: "Document"
-            MessageType.LOCATION -> "Location pin"
+            MessageType.LOCATION -> message.content.ifBlank { "Shared Location" }
             MessageType.LIVE_LOCATION -> "Live GPS Location"
             MessageType.CONTACT -> {
-                val name = message.content.substringBefore("|")
+                val name = message.content.substringBefore("|").ifBlank { "Contact" }
                 "Contact: $name"
             }
         }

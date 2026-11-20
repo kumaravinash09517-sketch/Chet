@@ -9,8 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -35,6 +37,7 @@ object NotificationHelper {
     const val EXTRA_CALLER_NAME = "extra_caller_name"
     const val EXTRA_IS_VIDEO = "extra_is_video"
     const val EXTRA_OFFER_SDP = "extra_offer_sdp"
+    const val EXTRA_AUTO_ACCEPT = "extra_auto_accept"
     const val EXTRA_PEER_ID = "extra_peer_id"
     const val EXTRA_PEER_NAME = "extra_peer_name"
     const val EXTRA_OPEN_CALL = "extra_open_call"
@@ -42,6 +45,7 @@ object NotificationHelper {
     const val KEY_TEXT_REPLY = "key_text_reply"
 
     private var activeRingtone: Ringtone? = null
+    private var outgoingToneGenerator: ToneGenerator? = null
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -151,6 +155,23 @@ object NotificationHelper {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val answerIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_OPEN_CALL, true)
+            putExtra(EXTRA_AUTO_ACCEPT, true)
+            putExtra(EXTRA_CALL_ID, callId)
+            putExtra(EXTRA_CALLER_ID, callerId)
+            putExtra(EXTRA_CALLER_NAME, callerName)
+            putExtra(EXTRA_IS_VIDEO, isVideo)
+            putExtra(EXTRA_OFFER_SDP, offerSdp)
+        }
+        val answerPending = PendingIntent.getActivity(
+            context,
+            203,
+            answerIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         val declineIntent = Intent(context, CallNotificationReceiver::class.java).apply {
             action = CallNotificationReceiver.ACTION_DECLINE_CALL
             putExtra(EXTRA_CALLER_ID, callerId)
@@ -173,7 +194,7 @@ object NotificationHelper {
             .setFullScreenIntent(fullScreenPending, true)
             .setAutoCancel(true)
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_call, "Answer", fullScreenPending)
+            .addAction(android.R.drawable.ic_menu_call, "Answer", answerPending)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", declinePending)
             .build()
 
@@ -265,6 +286,7 @@ object NotificationHelper {
     }
 
     fun stopRingtoneAndVibrate(context: Context) {
+        stopOutgoingRingback()
         runCatching { activeRingtone?.stop() }
         activeRingtone = null
         runCatching {
@@ -277,6 +299,23 @@ object NotificationHelper {
         }
         val manager = context.getSystemService(NotificationManager::class.java)
         manager?.cancel(NOTIFICATION_CALL_ID)
+    }
+
+    fun startOutgoingRingback() {
+        runCatching {
+            stopOutgoingRingback()
+            outgoingToneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 55).apply {
+                startTone(ToneGenerator.TONE_SUP_RINGTONE)
+            }
+        }
+    }
+
+    fun stopOutgoingRingback() {
+        runCatching {
+            outgoingToneGenerator?.stopTone()
+            outgoingToneGenerator?.release()
+        }
+        outgoingToneGenerator = null
     }
 
     private fun canPostNotifications(context: Context): Boolean {

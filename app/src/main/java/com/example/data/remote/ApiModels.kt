@@ -177,6 +177,70 @@ data class VerifyOtpResponse(
 }
 
 @JsonClass(generateAdapter = true)
+data class DirectLoginRequest(
+    @Json(name = "userId") val userId: String,
+    @Json(name = "user_id") val userIdSnake: String = userId,
+    @Json(name = "username") val username: String,
+    @Json(name = "displayName") val displayName: String,
+    @Json(name = "display_name") val displayNameSnake: String = displayName,
+    @Json(name = "device_id") val deviceId: String,
+    @Json(name = "deviceLockId") val deviceLockId: String,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "loginTimestamp") val loginTimestamp: Long,
+    @Json(name = "loginDateFormatted") val loginDateFormatted: String
+)
+
+@JsonClass(generateAdapter = true)
+data class DirectLoginResponse(
+    @Json(name = "success") val success: Boolean = true,
+    @Json(name = "token") val token: String? = null,
+    @Json(name = "access_token") val accessToken: String? = null,
+    @Json(name = "userId") val userId: String? = null,
+    @Json(name = "user_id") val userIdSnake: String? = null,
+    @Json(name = "id") val idTopLevel: String? = null,
+    @Json(name = "displayName") val displayName: String? = null,
+    @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "username") val username: String? = null,
+    @Json(name = "name") val nameTopLevel: String? = null,
+    @Json(name = "phone") val phone: String? = null,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
+    @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
+    @Json(name = "isBlocked") val isBlockedCamel: Boolean? = null,
+    @Json(name = "user") val user: RemoteUserDto? = null,
+    @Json(name = "message") val message: String? = null
+) {
+    fun resolvedToken(): String? =
+        token?.takeIf { it.isNotBlank() } ?: accessToken?.takeIf { it.isNotBlank() }
+
+    fun resolvedUserId(): String? =
+        userId?.trim()?.takeIf { it.isNotBlank() }
+            ?: userIdSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: idTopLevel?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedUserId()?.takeIf { it.isNotBlank() }
+
+    fun resolvedDisplayName(): String? =
+        displayName?.trim()?.takeIf { it.isNotBlank() }
+            ?: displayNameSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: username?.trim()?.takeIf { it.isNotBlank() }
+            ?: nameTopLevel?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedDisplayName()?.takeIf { it.isNotBlank() }
+
+    fun resolvedPhone(): String =
+        phone?.trim()?.takeIf { it.isNotBlank() } ?: user?.resolvedPhone().orEmpty()
+
+    fun resolvedAvatarUrl(): String? =
+        BackendJsonParsers.normalizeMediaUrl(
+            avatarUrl?.takeIf { it.isNotBlank() }
+                ?: avatarUrlSnake?.takeIf { it.isNotBlank() }
+                ?: user?.resolvedAvatarUrl()?.takeIf { it.isNotBlank() }
+        )
+
+    fun resolvedIsBlocked(): Boolean =
+        (isBlockedSnake == true) || (isBlockedCamel == true) || (user?.resolvedIsBlocked() == true)
+}
+
+@JsonClass(generateAdapter = true)
 data class RegisterUserRequest(
     @Json(name = "userId") val userId: String,
     @Json(name = "displayName") val displayName: String,
@@ -237,6 +301,7 @@ data class RemoteUserDto(
     @Json(name = "id") val id: String? = null,
     @Json(name = "displayName") val displayName: String? = null,
     @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "username") val username: String? = null,
     @Json(name = "name") val name: String? = null,
     @Json(name = "phone") val phone: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
@@ -260,14 +325,17 @@ data class RemoteUserDto(
     fun resolvedDisplayName(): String =
         displayName?.trim()?.takeIf { it.isNotBlank() }
             ?: displayNameSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: username?.trim()?.takeIf { it.isNotBlank() }
             ?: name?.trim()?.takeIf { it.isNotBlank() }
             ?: ""
 
     fun resolvedPhone(): String = phone?.trim().orEmpty()
 
     fun resolvedAvatarUrl(): String? =
-        avatarUrl?.trim()?.takeIf { it.isNotBlank() }
-            ?: avatarUrlSnake?.trim()?.takeIf { it.isNotBlank() }
+        BackendJsonParsers.normalizeMediaUrl(
+            avatarUrl?.trim()?.takeIf { it.isNotBlank() }
+                ?: avatarUrlSnake?.trim()?.takeIf { it.isNotBlank() }
+        )
 
     fun resolvedLastLoginMillis(): Long =
         lastLoginMillis ?: lastLoginMillisSnake ?: System.currentTimeMillis()
@@ -347,6 +415,7 @@ data class SendMessageSnakeCaseRequest(
 data class RemoteMessageDto(
     @Json(name = "id") val id: String = "",
     @Json(name = "senderId") val senderId: String = "",
+    @Json(name = "senderName") val senderName: String? = null,
     @Json(name = "receiverId") val receiverId: String = "",
     @Json(name = "content") val content: String = "",
     @Json(name = "type") val type: String = "TEXT",
@@ -367,10 +436,20 @@ data class MessagesListResponse(
 
 @JsonClass(generateAdapter = true)
 data class MediaUploadResponse(
-    @Json(name = "url") val url: String,
+    @Json(name = "url") val url: String? = null,
+    @Json(name = "mediaUrl") val mediaUrl: String? = null,
+    @Json(name = "media_url") val mediaUrlSnake: String? = null,
+    @Json(name = "fileUrl") val fileUrl: String? = null,
+    @Json(name = "file_url") val fileUrlSnake: String? = null,
+    @Json(name = "path") val path: String? = null,
     @Json(name = "fileName") val fileName: String? = null,
     @Json(name = "sizeBytes") val sizeBytes: Long? = null
-)
+) {
+    fun resolvedUrl(): String? =
+        BackendJsonParsers.normalizeMediaUrl(
+            url ?: mediaUrl ?: mediaUrlSnake ?: fileUrl ?: fileUrlSnake ?: path
+        )
+}
 
 @JsonClass(generateAdapter = true)
 data class IceServerDto(
@@ -391,6 +470,21 @@ data class BasicSuccessResponse(
 )
 
 object BackendJsonParsers {
+
+    fun normalizeMediaUrl(rawUrl: String?): String? {
+        val trimmed = rawUrl?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            ?: return null
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("content://", ignoreCase = true) ||
+            trimmed.startsWith("file://", ignoreCase = true) ||
+            trimmed.startsWith("data:", ignoreCase = true)
+        ) {
+            return trimmed
+        }
+        val base = NetworkModule.BASE_URL.trimEnd('/')
+        return "$base/${trimmed.trimStart('/')}"
+    }
 
     fun parseUsersFromBody(rawJson: String?): List<RemoteUserDto> {
         val trimmed = rawJson?.trim().orEmpty()
@@ -428,9 +522,11 @@ object BackendJsonParsers {
 
     private fun parseSingleUser(obj: org.json.JSONObject): RemoteUserDto? {
         val uid = firstNonBlankString(obj, "userId", "user_id", "id") ?: return null
-        val displayName = firstNonBlankString(obj, "displayName", "display_name", "name", "username")
+        val displayName = firstNonBlankString(obj, "displayName", "display_name", "username", "name")
         val phone = firstNonBlankString(obj, "phone", "phone_number", "phoneNumber", "mobile")
-        val avatarUrl = firstNonBlankString(obj, "avatarUrl", "avatar_url", "avatar", "photoUrl", "photo_url")
+        val avatarUrl = normalizeMediaUrl(
+            firstNonBlankString(obj, "avatarUrl", "avatar_url", "avatar", "photoUrl", "photo_url")
+        )
         val millis = parseTimestampMillis(
             obj,
             "lastLoginMillis",
@@ -501,32 +597,70 @@ object BackendJsonParsers {
     }
 
     fun parseSingleMessage(obj: org.json.JSONObject): RemoteMessageDto? {
-        val id = firstNonBlankString(obj, "id", "messageId", "message_id", "_id") ?: return null
-        val senderId = firstNonBlankString(obj, "senderId", "sender_id", "from", "fromUserId") ?: return null
-        val receiverId = firstNonBlankString(obj, "receiverId", "receiver_id", "to", "toUserId").orEmpty()
-        val content = firstNonBlankString(obj, "content", "text", "body")
-            ?: obj.optString("message").takeIf { it.isNotBlank() && it != "null" && !it.startsWith("{") }
+        val senderObj = obj.optJSONObject("sender")
+        val receiverObj = obj.optJSONObject("receiver")
+        val senderId = firstNonBlankString(obj, "senderId", "sender_id", "from", "fromUserId", "from_user_id")
+            ?: senderObj?.let { firstNonBlankString(it, "userId", "user_id", "id") }
+            ?: firstNonBlankString(obj, "sender")
+            ?: return null
+        val receiverId = firstNonBlankString(obj, "receiverId", "receiver_id", "to", "toUserId", "to_user_id")
+            ?: receiverObj?.let { firstNonBlankString(it, "userId", "user_id", "id") }
+            ?: firstNonBlankString(obj, "receiver")
             ?: ""
-        val rawType = firstNonBlankString(obj, "messageType", "message_type", "type") ?: "TEXT"
-        val normalizedType = if (rawType.equals("chat_message", ignoreCase = true) ||
-            rawType.equals("message", ignoreCase = true)
-        ) {
-            "TEXT"
-        } else {
-            rawType.uppercase()
-        }
-        val mediaUrl = firstNonBlankString(obj, "mediaUrl", "media_url", "fileUrl", "file_url")
-        val fileName = firstNonBlankString(obj, "fileName", "file_name")
-        val fileSizeBytes = listOf("fileSizeBytes", "file_size_bytes", "sizeBytes", "size_bytes")
+        val senderName = firstNonBlankString(obj, "senderName", "sender_name", "fromName", "from_name")
+            ?: senderObj?.let { firstNonBlankString(it, "displayName", "display_name", "username", "name") }
+
+        val nestedPayload = obj.optJSONObject("payload") ?: obj.optJSONObject("meta") ?: obj.optJSONObject("metadata")
+        val content = firstNonBlankString(
+            obj,
+            "content",
+            "text",
+            "body",
+            "caption",
+            "msg",
+            "messageText",
+            "message_text"
+        )
+            ?: obj.optString("message").takeIf {
+                it.isNotBlank() && !it.equals("null", ignoreCase = true) && !it.trim().startsWith("{")
+            }
+            ?: nestedPayload?.let { firstNonBlankString(it, "content", "text", "caption", "body") }
+            ?: ""
+
+        val mediaUrl = normalizeMediaUrl(
+            firstNonBlankString(
+                obj,
+                "mediaUrl",
+                "media_url",
+                "fileUrl",
+                "file_url",
+                "imageUrl",
+                "image_url",
+                "photoUrl",
+                "photo_url",
+                "attachmentUrl",
+                "attachment_url",
+                "url"
+            ) ?: nestedPayload?.let {
+                firstNonBlankString(it, "mediaUrl", "media_url", "fileUrl", "file_url", "url")
+            }
+        )
+        val fileName = firstNonBlankString(obj, "fileName", "file_name", "filename", "originalName", "original_name")
+            ?: nestedPayload?.let { firstNonBlankString(it, "fileName", "file_name") }
+        val fileSizeBytes = listOf("fileSizeBytes", "file_size_bytes", "sizeBytes", "size_bytes", "size")
             .firstOrNull { obj.has(it) && !obj.isNull(it) }
             ?.let { obj.optLong(it) }
-        val latitude = if (obj.has("latitude") && !obj.isNull("latitude")) obj.optDouble("latitude") else null
-        val longitude = if (obj.has("longitude") && !obj.isNull("longitude")) obj.optDouble("longitude") else null
+
+        val locObj = obj.optJSONObject("location") ?: obj.optJSONObject("coords") ?: nestedPayload
+        val latitude = parseDoubleOpt(obj, "latitude", "lat")
+            ?: locObj?.let { parseDoubleOpt(it, "latitude", "lat") }
+        val longitude = parseDoubleOpt(obj, "longitude", "lng", "lon", "long")
+            ?: locObj?.let { parseDoubleOpt(it, "longitude", "lng", "lon", "long") }
         val liveLocationActive = obj.optBoolean(
             "liveLocationActive",
-            obj.optBoolean("live_location_active", false)
+            obj.optBoolean("live_location_active", locObj?.optBoolean("active", false) ?: false)
         )
-        val status = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
+
         val timestamp = parseTimestampMillis(
             obj,
             "timestamp",
@@ -536,9 +670,26 @@ object BackendJsonParsers {
             "sent_at"
         ) ?: System.currentTimeMillis()
 
+        val id = firstNonBlankString(obj, "id", "messageId", "message_id", "_id", "msgId", "msg_id")
+            ?: "srv_${senderId}_${receiverId}_${timestamp}_${content.hashCode()}"
+
+        val rawType = firstNonBlankString(obj, "messageType", "message_type", "type", "mediaType", "media_type", "kind")
+            ?: "TEXT"
+        val normalizedType = resolveMessageTypeName(
+            rawType = rawType,
+            mediaUrl = mediaUrl,
+            fileName = fileName,
+            latitude = latitude,
+            longitude = longitude,
+            liveLocationActive = liveLocationActive
+        )
+
+        val status = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
+
         return RemoteMessageDto(
             id = id,
             senderId = senderId,
+            senderName = senderName,
             receiverId = receiverId,
             content = content,
             type = normalizedType,
@@ -553,6 +704,44 @@ object BackendJsonParsers {
         )
     }
 
+    private fun resolveMessageTypeName(
+        rawType: String,
+        mediaUrl: String?,
+        fileName: String?,
+        latitude: Double?,
+        longitude: Double?,
+        liveLocationActive: Boolean
+    ): String {
+        val upper = rawType.trim().uppercase()
+        val mapped = when (upper) {
+            "CHAT_MESSAGE", "MESSAGE", "TXT", "TEXT" -> "TEXT"
+            "IMAGE", "PHOTO", "PIC", "PICTURE", "IMG" -> "IMAGE"
+            "VIDEO", "VID", "MP4" -> "VIDEO"
+            "AUDIO", "VOICE", "SOUND", "MP3", "M4A" -> "AUDIO"
+            "DOCUMENT", "DOC", "FILE", "PDF", "ATTACHMENT" -> "DOCUMENT"
+            "LOCATION", "LOC", "GPS", "PIN" -> "LOCATION"
+            "LIVE_LOCATION", "LIVE_GPS", "LIVELOCATION" -> "LIVE_LOCATION"
+            "CONTACT", "VCARD" -> "CONTACT"
+            else -> upper
+        }
+
+        if (mapped == "TEXT") {
+            if (latitude != null && longitude != null) {
+                return if (liveLocationActive) "LIVE_LOCATION" else "LOCATION"
+            }
+            if (!mediaUrl.isNullOrBlank()) {
+                val hint = (fileName ?: mediaUrl).lowercase()
+                return when {
+                    hint.endsWith(".mp4") || hint.endsWith(".mov") || hint.endsWith(".mkv") || hint.endsWith(".webm") -> "VIDEO"
+                    hint.endsWith(".mp3") || hint.endsWith(".wav") || hint.endsWith(".m4a") || hint.endsWith(".aac") || hint.endsWith(".ogg") -> "AUDIO"
+                    hint.endsWith(".pdf") || hint.endsWith(".doc") || hint.endsWith(".docx") || hint.endsWith(".txt") || hint.endsWith(".zip") -> "DOCUMENT"
+                    else -> "IMAGE"
+                }
+            }
+        }
+        return mapped
+    }
+
     fun parseSendMessageStatus(rawJson: String?): String? {
         val trimmed = rawJson?.trim().orEmpty()
         if (trimmed.isEmpty() || !trimmed.startsWith("{")) return null
@@ -565,11 +754,27 @@ object BackendJsonParsers {
         }.getOrNull()
     }
 
+    private fun parseDoubleOpt(obj: org.json.JSONObject, vararg keys: String): Double? {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            val rawVal = obj.opt(key)
+            val num = when (rawVal) {
+                is Number -> rawVal.toDouble()
+                is String -> rawVal.trim().toDoubleOrNull()
+                else -> null
+            }
+            if (num != null && !num.isNaN() && !num.isInfinite()) {
+                return num
+            }
+        }
+        return null
+    }
+
     private fun firstNonBlankString(obj: org.json.JSONObject, vararg keys: String): String? {
         for (key in keys) {
             if (!obj.has(key) || obj.isNull(key)) continue
             val value = obj.optString(key).trim()
-            if (value.isNotBlank() && !value.equals("null", ignoreCase = true)) {
+            if (value.isNotBlank() && !value.equals("null", ignoreCase = true) && !value.startsWith("{")) {
                 return value
             }
         }

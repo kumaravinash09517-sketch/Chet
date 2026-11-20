@@ -31,6 +31,9 @@ class HelloSirApplication : Application() {
     @Volatile
     var isUiInForeground: Boolean = true
 
+    @Volatile
+    var activeChatPeerId: String? = null
+
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.createChannels(this)

@@ -22,8 +22,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.ContactPhone
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Pause
@@ -55,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
+import com.example.data.remote.BackendJsonParsers
 import com.example.ui.theme.IncomingBubbleDark
 import com.example.ui.theme.IncomingBubbleLight
 import com.example.ui.theme.OnlineGreen
@@ -88,6 +91,12 @@ fun ChatMessageBubble(
         bottomEnd = if (isMine) 4.dp else 18.dp
     )
 
+    val resolvedMediaSource = remember(message.localUri, message.mediaUrl) {
+        message.localUri?.takeIf { it.isNotBlank() }
+            ?: BackendJsonParsers.normalizeMediaUrl(message.mediaUrl)
+    }
+    val needsWideBubble = message.type != MessageType.TEXT && message.type != MessageType.CONTACT
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -100,13 +109,12 @@ fun ChatMessageBubble(
             tonalElevation = if (isMine) 0.dp else 1.dp,
             shadowElevation = 1.dp,
             modifier = Modifier
-                .widthIn(max = 300.dp)
+                .widthIn(min = if (needsWideBubble) 220.dp else 64.dp, max = 300.dp)
                 .clip(bubbleShape)
                 .combinedClickable(
                     onClick = {
-                        val mediaSource = message.localUri ?: message.mediaUrl
-                        if (message.type == MessageType.IMAGE && mediaSource != null) {
-                            onImagePreview(mediaSource)
+                        if (message.type == MessageType.IMAGE && resolvedMediaSource != null) {
+                            onImagePreview(resolvedMediaSource)
                         }
                     },
                     onLongClick = { onLongPressDelete(message) }
@@ -115,24 +123,63 @@ fun ChatMessageBubble(
             Column(modifier = Modifier.padding(10.dp)) {
                 when (message.type) {
                     MessageType.TEXT -> {
+                        val displayText = message.content.ifBlank {
+                            when {
+                                resolvedMediaSource != null -> message.fileName ?: "Attachment"
+                                message.latitude != null && message.longitude != null ->
+                                    String.format(Locale.US, "Location: %.5f, %.5f", message.latitude, message.longitude)
+                                else -> "Message"
+                            }
+                        }
                         Text(
-                            text = message.content,
+                            text = displayText,
                             style = MaterialTheme.typography.bodyLarge,
                             color = contentColor
                         )
                     }
                     MessageType.IMAGE -> {
-                        val source = message.localUri ?: message.mediaUrl
-                        if (source != null) {
+                        var imageLoadFailed by remember(resolvedMediaSource) { mutableStateOf(false) }
+                        if (resolvedMediaSource != null && !imageLoadFailed) {
                             AsyncImage(
-                                model = source,
-                                contentDescription = "Shared photo",
+                                model = resolvedMediaSource,
+                                contentDescription = message.content.ifBlank { "Shared photo" },
                                 contentScale = ContentScale.Crop,
+                                onError = { imageLoadFailed = true },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(190.dp)
                                     .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Black.copy(alpha = 0.12f))
                             )
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.Black.copy(alpha = 0.16f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(132.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = if (imageLoadFailed) Icons.Rounded.BrokenImage else Icons.Rounded.Image,
+                                        contentDescription = "Photo attachment",
+                                        tint = contentColor,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = message.fileName ?: if (imageLoadFailed) "Photo unavailable" else "Photo",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = contentColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                         if (message.content.isNotBlank()) {
                             Spacer(modifier = Modifier.height(6.dp))
@@ -148,7 +195,7 @@ fun ChatMessageBubble(
                             icon = Icons.Rounded.Videocam,
                             title = message.fileName ?: "Video Clip",
                             subtitle = formatBytes(message.fileSizeBytes),
-                            sourceUri = message.localUri ?: message.mediaUrl,
+                            sourceUri = resolvedMediaSource,
                             mimeType = "video/*",
                             contentColor = contentColor,
                             mutedColor = mutedColor
@@ -157,7 +204,7 @@ fun ChatMessageBubble(
                     MessageType.AUDIO -> {
                         AudioPlayerBubble(
                             title = message.fileName ?: "Audio Message",
-                            sourceUri = message.localUri ?: message.mediaUrl,
+                            sourceUri = resolvedMediaSource,
                             contentColor = contentColor,
                             mutedColor = mutedColor
                         )
@@ -167,7 +214,7 @@ fun ChatMessageBubble(
                             icon = Icons.Rounded.Description,
                             title = message.fileName ?: "Document",
                             subtitle = formatBytes(message.fileSizeBytes),
-                            sourceUri = message.localUri ?: message.mediaUrl,
+                            sourceUri = resolvedMediaSource,
                             mimeType = "*/*",
                             contentColor = contentColor,
                             mutedColor = mutedColor

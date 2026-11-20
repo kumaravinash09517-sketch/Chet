@@ -54,6 +54,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -308,11 +309,17 @@ fun HomeScreen(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
+            LaunchedEffect(selectedTab) {
+                if (selectedTab == 1) {
+                    onRefreshDirectory()
+                }
+            }
+
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
                 placeholder = {
-                    Text("Search by phone number, name, or ID…")
+                    Text("Search by name, user ID, or phone…")
                 },
                 leadingIcon = {
                     Icon(Icons.Rounded.Search, contentDescription = "Search")
@@ -487,6 +494,9 @@ fun UserAvatarCircle(
     avatarUrl: String?,
     sizeDp: Int
 ) {
+    val normalizedAvatar = remember(avatarUrl) {
+        com.example.data.remote.BackendJsonParsers.normalizeMediaUrl(avatarUrl)
+    }
     Box(
         modifier = Modifier
             .size(sizeDp.dp)
@@ -494,9 +504,9 @@ fun UserAvatarCircle(
             .background(MaterialTheme.colorScheme.primaryContainer),
         contentAlignment = Alignment.Center
     ) {
-        if (!avatarUrl.isNullOrBlank()) {
+        if (!normalizedAvatar.isNullOrBlank()) {
             AsyncImage(
-                model = avatarUrl,
+                model = normalizedAvatar,
                 contentDescription = name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -653,20 +663,27 @@ private fun RegisteredUserRow(
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = user.phone.ifBlank { "@${user.userId}" },
+                    text = "@${user.userId}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             Spacer(modifier = Modifier.height(3.dp))
+            val statusPrefix = if (user.isOnline) "Online" else "Last login: ${user.lastLoginFormatted}"
+            val secondaryMeta = if (user.phone.isNotBlank()) "${user.phone} • $statusPrefix" else statusPrefix
             Text(
-                text = "Last login: ${user.lastLoginFormatted}",
+                text = secondaryMeta,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (user.isOnline) OnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }

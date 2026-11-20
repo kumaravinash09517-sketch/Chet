@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.HelloSirApplication
+import com.example.core.security.CallNotificationAction
 import com.example.data.remote.SignalingEvent
 import com.example.platform.ActiveCallService
 import com.example.platform.NotificationHelper
@@ -66,6 +67,33 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         observeCallSignaling()
+        observeNotificationCallActions()
+    }
+
+    private fun observeNotificationCallActions() {
+        viewModelScope.launch {
+            com.example.core.security.GlobalSecurityEventBus.callActions.collect { action ->
+                when (action) {
+                    is CallNotificationAction.Decline -> {
+                        if (_callState.value is CallState.IncomingRinging) {
+                            declineIncomingCall()
+                        } else {
+                            NotificationHelper.stopRingtoneAndVibrate(app)
+                        }
+                    }
+                    is CallNotificationAction.Answer -> {
+                        injectIncomingCallFromIntent(
+                            callId = action.callId,
+                            callerId = action.callerId,
+                            callerName = action.callerName,
+                            isVideo = action.isVideo,
+                            offerSdp = action.offerSdp
+                        )
+                        acceptIncomingCall()
+                    }
+                }
+            }
+        }
     }
 
     private fun observeCallSignaling() {
@@ -74,8 +102,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
                         if (_callState.value is CallState.Idle || _callState.value is CallState.Ended) {
+                            val resolvedCallerName = if (event.callerName.isBlank() || event.callerName == event.callerId) {
+                                app.database.userDao().getUser(event.callerId)?.displayName ?: event.callerId
+                            } else {
+                                event.callerName
+                            }
                             activePeerId = event.callerId
-                            activePeerName = event.callerName
+                            activePeerName = resolvedCallerName
                             activeIsVideo = event.isVideo
                             _isVideoEnabled.value = event.isVideo
                             _hasRemoteVideo.value = false
@@ -84,7 +117,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                             _callState.value = CallState.IncomingRinging(
                                 callId = event.callId,
                                 callerId = event.callerId,
-                                callerName = event.callerName,
+                                callerName = resolvedCallerName,
                                 isVideo = event.isVideo,
                                 offerSdp = event.sdp
                             )
@@ -92,7 +125,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is SignalingEvent.CallAnswerReceived -> {
                         val current = _callState.value
-                        if (current is CallState.OutgoingRinging && event.callerId == current.peerId) {
+                        if (current is CallState.OutgoingRinging && event.callerId.equals(current.peerId, ignoreCase = true)) {
+                            NotificationHelper.stopOutgoingRingback()
                             webRTCClient?.handleRemoteAnswer(event.sdp)
                             drainPendingIce()
                             syncRenderersToClient()
@@ -116,7 +150,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     is SignalingEvent.CallEnded -> {
-                        if (event.peerId == activePeerId || activePeerId.isNotBlank()) {
+                        if (event.peerId.equals(activePeerId, ignoreCase = true) || activePeerId.isNotBlank()) {
                             endCallLocally(sendSignal = false, reason = "Call ended")
                         }
                     }
@@ -140,6 +174,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             pendingRemoteIce.clear()
 
             _callState.value = CallState.OutgoingRinging(peerId, peerName, isVideo)
+            NotificationHelper.startOutgoingRingback()
 
             // Open camera and local preview immediately without waiting for network ICE fetch
             val client = ensureWebRtcClient()
@@ -384,6 +419,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun transitionToConnected(peerId: String, peerName: String, isVideo: Boolean) {
+        NotificationHelper.stopOutgoingRingback()
         if (_callState.value is CallState.Connected) return
         _callState.value = CallState.Connected(peerId, peerName, isVideo)
         timerJob?.cancel()

@@ -52,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -108,6 +109,16 @@ fun ChatScreen(
     var showCallPermRationale by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
+
+    DisposableEffect(peerId) {
+        val app = context.applicationContext as? com.example.HelloSirApplication
+        app?.activeChatPeerId = peerId
+        onDispose {
+            if (app?.activeChatPeerId == peerId) {
+                app.activeChatPeerId = null
+            }
+        }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {

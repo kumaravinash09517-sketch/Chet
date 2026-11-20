@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.RemoteInput
 import com.example.HelloSirApplication
+import com.example.core.security.CallNotificationAction
+import com.example.core.security.GlobalSecurityEventBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -23,6 +25,7 @@ class CallNotificationReceiver : BroadcastReceiver() {
             ACTION_DECLINE_CALL -> {
                 NotificationHelper.stopRingtoneAndVibrate(context)
                 val callerId = intent.getStringExtra(NotificationHelper.EXTRA_CALLER_ID) ?: return
+                GlobalSecurityEventBus.emitCallAction(CallNotificationAction.Decline(callerId))
                 CoroutineScope(Dispatchers.IO).launch {
                     val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
                     app.signalingClient.sendCallEnd(myId, callerId, isReject = true)

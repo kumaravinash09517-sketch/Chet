@@ -365,4 +365,62 @@ class ExampleRobolectricTest {
         assertTrue(GlobalSecurityEventBus.isBlocked.value)
         GlobalSecurityEventBus.clearBlocked()
     }
+
+    @Test
+    fun `directLoginResponse resolves username, userId, normalized avatarUrl, and isBlocked`() {
+        val moshi = com.example.data.remote.NetworkModule.provideMoshi()
+        val adapter = moshi.adapter(com.example.data.remote.DirectLoginResponse::class.java)
+
+        val parsed = adapter.fromJson(
+            """{"success":true,"token":"jwt_99","user":{"user_id":"avinash_01","username":"Avinash","avatar_url":"/uploads/av.jpg","is_blocked":false}}"""
+        )!!
+        assertEquals("jwt_99", parsed.resolvedToken())
+        assertEquals("avinash_01", parsed.resolvedUserId())
+        assertEquals("Avinash", parsed.resolvedDisplayName())
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/av.jpg", parsed.resolvedAvatarUrl())
+        org.junit.Assert.assertFalse(parsed.resolvedIsBlocked())
+    }
+
+    @Test
+    fun `backendJsonParsers infers IMAGE, LOCATION, and TEXT with relative media URL normalization`() {
+        val raw = """
+            {
+              "messages": [
+                {"id":"m_img","sender_id":"sandeep","receiver_id":"avinash","type":"PHOTO","media_url":"/uploads/photo1.jpg","caption":"Look here","timestamp":1763636400},
+                {"id":"m_loc","sender_id":"sandeep","receiver_id":"avinash","type":"TEXT","location":{"lat":28.6139,"lng":77.2090},"text":"Connaught Place","timestamp":1763636450},
+                {"sender_id":"sandeep","receiver_id":"avinash","msg":"Hello Sir!","timestamp":1763636500}
+              ]
+            }
+        """.trimIndent()
+        val parsed = com.example.data.remote.BackendJsonParsers.parseMessagesFromBody(raw)
+        assertEquals(3, parsed.size)
+
+        val img = parsed[0]
+        assertEquals("IMAGE", img.type)
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/photo1.jpg", img.mediaUrl)
+        assertEquals("Look here", img.content)
+
+        val loc = parsed[1]
+        assertEquals("LOCATION", loc.type)
+        assertEquals(28.6139, loc.latitude!!, 0.0001)
+        assertEquals(77.2090, loc.longitude!!, 0.0001)
+        assertEquals("Connaught Place", loc.content)
+
+        val txt = parsed[2]
+        assertTrue(txt.id.isNotBlank())
+        assertEquals("TEXT", txt.type)
+        assertEquals("Hello Sir!", txt.content)
+    }
+
+    @Test
+    fun `incoming message alert carries senderName and message headline`() = runTest {
+        val alert = com.example.core.security.IncomingMessageAlert(
+            messageId = "msg_alert_1",
+            peerId = "u_919250903007",
+            senderName = "Sandeep",
+            headline = "Hello Sir, calling now"
+        )
+        assertEquals("Sandeep", alert.senderName)
+        assertEquals("Hello Sir, calling now", alert.headline)
+    }
 }
