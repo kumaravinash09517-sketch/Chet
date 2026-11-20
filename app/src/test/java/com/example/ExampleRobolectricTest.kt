@@ -217,6 +217,63 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `moshi parses verify-otp responses without userId missing crash at user`() {
+        val moshi = com.example.data.remote.NetworkModule.provideMoshi()
+        val adapter = moshi.adapter(com.example.data.remote.VerifyOtpResponse::class.java)
+
+        val otpVerifiedOnly = adapter.fromJson("""{"status":"otp_verified","verified":true}""")!!
+        assertTrue(otpVerifiedOnly.isOtpVerified())
+        assertTrue(otpVerifiedOnly.isProfileSetupExplicitlyRequired())
+
+        val emptyUserObj = adapter.fromJson("""{"success":true,"status":"otp_verified","user":{}}""")!!
+        assertTrue(emptyUserObj.isOtpVerified())
+        assertEquals(null, emptyUserObj.resolvedUserId())
+
+        val snakeCaseNestedUser = adapter.fromJson(
+            """{"success":true,"token":"tok_123","user":{"user_id":"u_919876543210","display_name":"Avinash","phone":null,"is_blocked":false}}"""
+        )!!
+        assertEquals("u_919876543210", snakeCaseNestedUser.resolvedUserId())
+        assertEquals("Avinash", snakeCaseNestedUser.resolvedDisplayName())
+        assertTrue(snakeCaseNestedUser.canCompleteExistingLoginDirectly())
+
+        val idBlockedUser = adapter.fromJson(
+            """{"success":true,"token":"tok_456","user":{"id":"usr_77","name":"Riya","is_blocked":true}}"""
+        )!!
+        assertEquals("usr_77", idBlockedUser.resolvedUserId())
+        assertEquals("Riya", idBlockedUser.resolvedDisplayName())
+        assertTrue(idBlockedUser.resolvedIsBlocked())
+        org.junit.Assert.assertFalse(idBlockedUser.canCompleteExistingLoginDirectly())
+    }
+
+    @Test
+    fun `sessionManager allows same-phone re-login and blocks other active accounts`() {
+        assertTrue(
+            com.example.core.security.SessionManager.isAllowedForActiveLock(
+                existingUserId = "u_919876543210",
+                existingPhone = "+919876543210",
+                candidateUserId = "u_919876543210",
+                candidatePhone = "9876543210"
+            )
+        )
+        assertTrue(
+            com.example.core.security.SessionManager.isAllowedForActiveLock(
+                existingUserId = "u_919876543210",
+                existingPhone = "+919876543210",
+                candidateUserId = "different_id_same_phone",
+                candidatePhone = "09876543210"
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.core.security.SessionManager.isAllowedForActiveLock(
+                existingUserId = "u_919876543210",
+                existingPhone = "+919876543210",
+                candidateUserId = "u_other",
+                candidatePhone = "+911122334455"
+            )
+        )
+    }
+
+    @Test
     fun `403 blocklist event sets blocked state`() {
         GlobalSecurityEventBus.clearBlocked()
         GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")

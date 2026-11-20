@@ -106,15 +106,20 @@ fun LoginScreen(
     var userIdInput by rememberSaveable { mutableStateOf(flowState.verifiedUserId) }
     var skippedAvatar by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(flowState.step, flowState.verifiedUserId, flowState.prefilledName) {
+    LaunchedEffect(flowState.step, flowState.phone, flowState.verifiedUserId, flowState.prefilledName) {
         if (flowState.step == OtpLoginStep.PHONE_ENTRY) {
             otpInput = ""
+            if (flowState.phone.isBlank()) {
+                displayNameInput = ""
+                userIdInput = ""
+                skippedAvatar = false
+            }
         }
         if (flowState.step == OtpLoginStep.PROFILE_SETUP) {
             if (flowState.verifiedUserId.isNotBlank()) {
                 userIdInput = flowState.verifiedUserId
             }
-            if (displayNameInput.isBlank() && flowState.prefilledName.isNotBlank()) {
+            if (flowState.prefilledName.isNotBlank() && displayNameInput.isBlank()) {
                 displayNameInput = flowState.prefilledName
             }
         }

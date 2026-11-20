@@ -331,6 +331,10 @@ class ChatRepository(
                 return@withContext Result.failure(IllegalStateException(errorMsg))
             }
             val body = response.body() ?: SendOtpResponse(success = true)
+            if (body.resolvedIsBlocked()) {
+                GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+            }
             if (!body.success) {
                 Result.failure(IllegalStateException(body.message ?: "Unable to send OTP."))
             } else {
@@ -377,6 +381,10 @@ class ChatRepository(
                     return@withContext Result.failure(IllegalStateException(errorMsg))
                 }
                 val body = response.body() ?: VerifyOtpResponse(success = true)
+                if (body.resolvedIsBlocked()) {
+                    GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                    return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+                }
                 if (!body.isOtpVerified()) {
                     Result.failure(IllegalStateException(body.message ?: "Invalid OTP code."))
                 } else {
@@ -386,6 +394,87 @@ class ChatRepository(
                 Result.failure(e)
             }
         }
+
+    suspend fun findCachedUserProfile(phone: String, userId: String?): UserEntity? =
+        withContext(Dispatchers.IO) {
+            val cleanId = userId?.trim().orEmpty()
+            if (cleanId.isNotEmpty()) {
+                userDao.getUser(cleanId)?.let { return@withContext it }
+            }
+            val cleanPhone = PhoneAuthUtils.normalizePhoneNumber(phone)
+            val tail10 = cleanPhone.filter { it.isDigit() }.takeLast(10)
+            if (tail10.isNotEmpty()) {
+                val matches = userDao.searchUsers(tail10)
+                matches.firstOrNull { !it.isBlocked }?.let { return@withContext it }
+            }
+            null
+        }
+
+    suspend fun completeVerifiedLogin(
+        phone: String,
+        resp: VerifyOtpResponse
+    ): Result<UserSession> = withContext(Dispatchers.IO) {
+        if (resp.resolvedIsBlocked()) {
+            GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+            return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+        }
+        val cleanPhone = PhoneAuthUtils.normalizePhoneNumber(phone).ifBlank { phone.trim() }
+        val fallbackId = cleanPhone.filter { it.isDigit() }.takeIf { it.isNotBlank() }?.let { "u_$it" } ?: ""
+        val cleanId = resp.resolvedUserId()?.trim()?.ifBlank { fallbackId } ?: fallbackId
+        val cleanName = resp.resolvedDisplayName()?.trim().orEmpty()
+        if (cleanId.isBlank() || cleanName.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("Profile details missing."))
+        }
+        if (!sessionManager.canRegisterUser(cleanId, cleanPhone)) {
+            return@withContext Result.failure(
+                IllegalStateException("This device is locked to another registered account.")
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        val formatted = formatDateTime(now)
+        val hardwareDeviceId = sessionManager.getOrCreateDeviceLockId()
+        val resolvedAvatar = resp.resolvedAvatarUrl()
+
+        val session = sessionManager.saveSession(
+            userId = cleanId,
+            displayName = cleanName,
+            phone = cleanPhone,
+            avatarUrl = resolvedAvatar,
+            serverToken = resp.resolvedToken(),
+            registeredAtMillis = now,
+            registeredAtFormatted = formatted,
+            deviceIdOverride = hardwareDeviceId
+        )
+
+        userDao.upsertUser(
+            UserEntity(
+                userId = cleanId,
+                displayName = cleanName,
+                phone = cleanPhone,
+                avatarUrl = resolvedAvatar,
+                lastLoginMillis = now,
+                lastLoginFormatted = formatted,
+                isOnline = true
+            )
+        )
+
+        runCatching {
+            apiService.sendAdminWebhook(
+                AdminWebhookEventRequest(
+                    eventType = "USER_LOGIN",
+                    userId = cleanId,
+                    displayName = cleanName,
+                    timestamp = now,
+                    summary = "User $cleanName (@$cleanId, $cleanPhone) logged in at $formatted"
+                )
+            )
+        }
+
+        signalingClient.connect()
+        syncUserDirectory()
+        Result.success(session)
+    }
 
     suspend fun uploadAvatarPhoto(uri: Uri, senderHint: String): Result<String> =
         withContext(Dispatchers.IO) {
@@ -475,13 +564,18 @@ class ChatRepository(
             }
 
             val body = response.body()
-            val resolvedAvatar = body?.user?.avatarUrl ?: avatarUrl
+            if (body?.resolvedIsBlocked() == true) {
+                GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                return@withContext Result.failure(SecurityException("You are blocked by the administrator."))
+            }
+
+            val resolvedAvatar = body?.resolvedAvatarUrl() ?: avatarUrl
             val session = sessionManager.saveSession(
                 userId = cleanId,
                 displayName = cleanName,
                 phone = cleanPhone,
                 avatarUrl = resolvedAvatar,
-                serverToken = body?.token ?: verifiedToken,
+                serverToken = body?.resolvedToken() ?: verifiedToken,
                 registeredAtMillis = now,
                 registeredAtFormatted = formatted,
                 deviceIdOverride = effectiveDeviceId
@@ -525,18 +619,25 @@ class ChatRepository(
             val response = apiService.getUserDirectory()
             if (response.isSuccessful) {
                 val remoteUsers = response.body()?.users.orEmpty()
-                val mapped = remoteUsers.map { dto ->
-                    val millis = if (dto.lastLoginMillis > 0L) dto.lastLoginMillis else System.currentTimeMillis()
+                val mapped = remoteUsers.mapNotNull { dto ->
+                    val uid = dto.resolvedUserId()
+                    if (uid.isBlank()) return@mapNotNull null
+                    val rawMillis = dto.resolvedLastLoginMillis()
+                    val millis = if (rawMillis > 0L) rawMillis else System.currentTimeMillis()
                     UserEntity(
-                        userId = dto.userId,
-                        displayName = dto.displayName.ifBlank { dto.userId },
-                        phone = dto.phone,
-                        avatarUrl = dto.avatarUrl,
+                        userId = uid,
+                        displayName = dto.resolvedDisplayName().ifBlank { uid },
+                        phone = dto.resolvedPhone(),
+                        avatarUrl = dto.resolvedAvatarUrl(),
                         lastLoginMillis = millis,
-                        lastLoginFormatted = dto.lastLoginFormatted.ifBlank { formatDateTime(millis) },
-                        isOnline = dto.isOnline,
-                        isBlocked = dto.isBlocked
+                        lastLoginFormatted = dto.resolvedLastLoginFormatted().ifBlank { formatDateTime(millis) },
+                        isOnline = dto.resolvedIsOnline(),
+                        isBlocked = dto.resolvedIsBlocked()
                     )
+                }
+                val currentUserId = sessionManager.getCurrentSession()?.userId
+                if (currentUserId != null && mapped.any { it.userId == currentUserId && it.isBlocked }) {
+                    GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                 }
                 if (mapped.isNotEmpty()) {
                     userDao.upsertUsers(mapped)
@@ -573,17 +674,20 @@ class ChatRepository(
             val response = apiService.searchUsers(clean)
             if (response.isSuccessful) {
                 val remoteUsers = response.body()?.users.orEmpty()
-                val mapped = remoteUsers.map { dto ->
-                    val millis = if (dto.lastLoginMillis > 0L) dto.lastLoginMillis else System.currentTimeMillis()
+                val mapped = remoteUsers.mapNotNull { dto ->
+                    val uid = dto.resolvedUserId()
+                    if (uid.isBlank()) return@mapNotNull null
+                    val rawMillis = dto.resolvedLastLoginMillis()
+                    val millis = if (rawMillis > 0L) rawMillis else System.currentTimeMillis()
                     UserEntity(
-                        userId = dto.userId,
-                        displayName = dto.displayName.ifBlank { dto.userId },
-                        phone = dto.phone,
-                        avatarUrl = dto.avatarUrl,
+                        userId = uid,
+                        displayName = dto.resolvedDisplayName().ifBlank { uid },
+                        phone = dto.resolvedPhone(),
+                        avatarUrl = dto.resolvedAvatarUrl(),
                         lastLoginMillis = millis,
-                        lastLoginFormatted = dto.lastLoginFormatted.ifBlank { formatDateTime(millis) },
-                        isOnline = dto.isOnline,
-                        isBlocked = dto.isBlocked
+                        lastLoginFormatted = dto.resolvedLastLoginFormatted().ifBlank { formatDateTime(millis) },
+                        isOnline = dto.resolvedIsOnline(),
+                        isBlocked = dto.resolvedIsBlocked()
                     )
                 }
                 if (mapped.isNotEmpty()) {

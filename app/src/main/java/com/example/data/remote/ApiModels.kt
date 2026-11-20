@@ -20,8 +20,12 @@ data class SendOtpResponse(
     @Json(name = "telegram_bot_url") val telegramBotUrl: String? = null,
     @Json(name = "telegramBotUrl") val telegramBotUrlCamel: String? = null,
     @Json(name = "bot_username") val botUsername: String? = null,
-    @Json(name = "botUsername") val botUsernameCamel: String? = null
+    @Json(name = "botUsername") val botUsernameCamel: String? = null,
+    @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
+    @Json(name = "isBlocked") val isBlockedCamel: Boolean? = null
 ) {
+    fun resolvedIsBlocked(): Boolean = (isBlockedSnake == true) || (isBlockedCamel == true)
+
     fun resolvedExpiresInSeconds(): Int =
         expiresInSeconds ?: expiresInSecondsSnake ?: expiresInSnake ?: 60
 
@@ -58,6 +62,7 @@ data class VerifyOtpRequest(
 data class VerifyOtpResponse(
     @Json(name = "success") val success: Boolean = true,
     @Json(name = "verified") val verified: Boolean? = null,
+    @Json(name = "otp_verified") val otpVerifiedSnake: Boolean? = null,
     @Json(name = "status") val status: String? = null,
     @Json(name = "requires_profile") val requiresProfile: Boolean? = null,
     @Json(name = "requires_name") val requiresName: Boolean? = null,
@@ -69,10 +74,14 @@ data class VerifyOtpResponse(
     @Json(name = "access_token") val accessToken: String? = null,
     @Json(name = "userId") val userId: String? = null,
     @Json(name = "user_id") val userIdSnake: String? = null,
+    @Json(name = "id") val idTopLevel: String? = null,
     @Json(name = "displayName") val displayName: String? = null,
     @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "name") val nameTopLevel: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
+    @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
+    @Json(name = "isBlocked") val isBlockedCamel: Boolean? = null,
     @Json(name = "user") val user: RemoteUserDto? = null,
     @Json(name = "message") val message: String? = null
 ) {
@@ -82,20 +91,24 @@ data class VerifyOtpResponse(
     fun resolvedUserId(): String? =
         userId?.takeIf { it.isNotBlank() }
             ?: userIdSnake?.takeIf { it.isNotBlank() }
-            ?: user?.userId?.takeIf { it.isNotBlank() }
+            ?: idTopLevel?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedUserId()?.takeIf { it.isNotBlank() }
 
     fun resolvedDisplayName(): String? =
         displayName?.takeIf { it.isNotBlank() }
             ?: displayNameSnake?.takeIf { it.isNotBlank() }
-            ?: user?.displayName?.takeIf { it.isNotBlank() }
+            ?: nameTopLevel?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedDisplayName()?.takeIf { it.isNotBlank() }
 
     fun resolvedAvatarUrl(): String? =
         avatarUrl?.takeIf { it.isNotBlank() }
             ?: avatarUrlSnake?.takeIf { it.isNotBlank() }
-            ?: user?.avatarUrl?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedAvatarUrl()?.takeIf { it.isNotBlank() }
 
-    fun isOtpVerified(): Boolean {
-        if (verified == true) return true
+    fun resolvedIsBlocked(): Boolean =
+        (isBlockedSnake == true) || (isBlockedCamel == true) || (user?.resolvedIsBlocked() == true)
+
+    fun isProfileSetupExplicitlyRequired(): Boolean {
         if (requiresProfile == true ||
             requiresName == true ||
             needsProfile == true ||
@@ -106,22 +119,33 @@ data class VerifyOtpResponse(
             return true
         }
         val normalizedStatus = status?.trim()?.lowercase()
-        if (normalizedStatus in setOf(
-                "ok",
-                "success",
-                "verified",
-                "profile_required",
-                "requires_profile",
-                "requires_name",
-                "needs_profile",
-                "needs_name",
-                "needs_registration",
-                "new_user"
-            )
-        ) {
+        return normalizedStatus in setOf(
+            "otp_verified",
+            "profile_required",
+            "requires_profile",
+            "requires_name",
+            "needs_profile",
+            "needs_name",
+            "needs_registration",
+            "new_user"
+        )
+    }
+
+    fun canCompleteExistingLoginDirectly(): Boolean =
+        !resolvedIsBlocked() &&
+            !isProfileSetupExplicitlyRequired() &&
+            !resolvedToken().isNullOrBlank() &&
+            !resolvedDisplayName().isNullOrBlank()
+
+    fun isOtpVerified(): Boolean {
+        if (verified == true || otpVerifiedSnake == true) return true
+        if (isProfileSetupExplicitlyRequired()) return true
+
+        val normalizedStatus = status?.trim()?.lowercase()
+        if (normalizedStatus in setOf("ok", "success", "verified", "otp_verified")) {
             return true
         }
-        if (verified == false) return false
+        if (verified == false || otpVerifiedSnake == false) return false
         if (success) return true
 
         val rawMsg = message?.trim().orEmpty()
@@ -168,21 +192,82 @@ data class RegisterUserRequest(
 data class RegisterUserResponse(
     @Json(name = "success") val success: Boolean = true,
     @Json(name = "token") val token: String? = null,
+    @Json(name = "access_token") val accessToken: String? = null,
+    @Json(name = "userId") val userId: String? = null,
+    @Json(name = "user_id") val userIdSnake: String? = null,
+    @Json(name = "id") val idTopLevel: String? = null,
+    @Json(name = "displayName") val displayName: String? = null,
+    @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
+    @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
+    @Json(name = "isBlocked") val isBlockedCamel: Boolean? = null,
     @Json(name = "user") val user: RemoteUserDto? = null,
     @Json(name = "message") val message: String? = null
-)
+) {
+    fun resolvedToken(): String? =
+        token?.takeIf { it.isNotBlank() } ?: accessToken?.takeIf { it.isNotBlank() }
+
+    fun resolvedAvatarUrl(): String? =
+        avatarUrl?.takeIf { it.isNotBlank() }
+            ?: avatarUrlSnake?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedAvatarUrl()?.takeIf { it.isNotBlank() }
+
+    fun resolvedIsBlocked(): Boolean =
+        (isBlockedSnake == true) || (isBlockedCamel == true) || (user?.resolvedIsBlocked() == true)
+}
 
 @JsonClass(generateAdapter = true)
 data class RemoteUserDto(
-    @Json(name = "userId") val userId: String,
-    @Json(name = "displayName") val displayName: String,
-    @Json(name = "phone") val phone: String = "",
+    @Json(name = "userId") val userId: String? = null,
+    @Json(name = "user_id") val userIdSnake: String? = null,
+    @Json(name = "id") val id: String? = null,
+    @Json(name = "displayName") val displayName: String? = null,
+    @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "name") val name: String? = null,
+    @Json(name = "phone") val phone: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
-    @Json(name = "lastLoginMillis") val lastLoginMillis: Long = System.currentTimeMillis(),
-    @Json(name = "lastLoginFormatted") val lastLoginFormatted: String = "",
-    @Json(name = "isOnline") val isOnline: Boolean = false,
-    @Json(name = "isBlocked") val isBlocked: Boolean = false
-)
+    @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
+    @Json(name = "lastLoginMillis") val lastLoginMillis: Long? = null,
+    @Json(name = "last_login_millis") val lastLoginMillisSnake: Long? = null,
+    @Json(name = "lastLoginFormatted") val lastLoginFormatted: String? = null,
+    @Json(name = "last_login_formatted") val lastLoginFormattedSnake: String? = null,
+    @Json(name = "isOnline") val isOnline: Boolean? = null,
+    @Json(name = "is_online") val isOnlineSnake: Boolean? = null,
+    @Json(name = "isBlocked") val isBlocked: Boolean? = null,
+    @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
+    @Json(name = "device_id") val deviceIdSnake: String? = null
+) {
+    fun resolvedUserId(): String =
+        userId?.trim()?.takeIf { it.isNotBlank() }
+            ?: userIdSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: id?.trim()?.takeIf { it.isNotBlank() }
+            ?: ""
+
+    fun resolvedDisplayName(): String =
+        displayName?.trim()?.takeIf { it.isNotBlank() }
+            ?: displayNameSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: name?.trim()?.takeIf { it.isNotBlank() }
+            ?: ""
+
+    fun resolvedPhone(): String = phone?.trim().orEmpty()
+
+    fun resolvedAvatarUrl(): String? =
+        avatarUrl?.trim()?.takeIf { it.isNotBlank() }
+            ?: avatarUrlSnake?.trim()?.takeIf { it.isNotBlank() }
+
+    fun resolvedLastLoginMillis(): Long =
+        lastLoginMillis ?: lastLoginMillisSnake ?: System.currentTimeMillis()
+
+    fun resolvedLastLoginFormatted(): String =
+        lastLoginFormatted?.trim()?.takeIf { it.isNotBlank() }
+            ?: lastLoginFormattedSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: ""
+
+    fun resolvedIsOnline(): Boolean = (isOnline == true) || (isOnlineSnake == true)
+
+    fun resolvedIsBlocked(): Boolean = (isBlocked == true) || (isBlockedSnake == true)
+}
 
 @JsonClass(generateAdapter = true)
 data class UserDirectoryResponse(

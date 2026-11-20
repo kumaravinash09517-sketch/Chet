@@ -289,9 +289,10 @@ private fun HelloSirRoot(
                         wsConnected = wsConnected,
                         onBack = { navController.popBackStack() },
                         onLogoutConfirmed = {
-                            mainViewModel.logout()
-                            navController.navigate(LoginRoute) {
-                                popUpTo(0) { inclusive = true }
+                            mainViewModel.logout {
+                                navController.navigate(LoginRoute) {
+                                    popUpTo(0) { inclusive = true }
+                                }
                             }
                         }
                     )

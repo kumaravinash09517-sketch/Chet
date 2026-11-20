@@ -175,16 +175,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.verifyOtp(normalizedPhone, cleanOtp)
             result.onSuccess { resp ->
                 countdownJob?.cancel()
+                if (resp.canCompleteExistingLoginDirectly()) {
+                    val directResult = repository.completeVerifiedLogin(normalizedPhone, resp)
+                    directResult.onSuccess {
+                        val deviceId = _loginFlowState.value.deviceId.ifBlank { repository.getDeviceLockId() }
+                        _loginFlowState.value = LoginFlowState(deviceId = deviceId)
+                        return@launch
+                    }.onFailure { directErr ->
+                        if (directErr is SecurityException) {
+                            _loginFlowState.update {
+                                it.copy(isLoading = false, errorMessage = directErr.message)
+                            }
+                            return@launch
+                        }
+                    }
+                }
+
+                val cachedUser = repository.findCachedUserProfile(normalizedPhone, resp.resolvedUserId())
                 val derivedId = resp.resolvedUserId()
+                    ?: cachedUser?.userId?.takeIf { it.isNotBlank() }
                     ?: ("u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone })
+                val prefilledName = resp.resolvedDisplayName()
+                    ?: cachedUser?.displayName?.takeIf { it.isNotBlank() && it != derivedId }
+                    ?: ""
+                val prefilledAvatar = resp.resolvedAvatarUrl() ?: cachedUser?.avatarUrl
                 _loginFlowState.update {
                     it.copy(
                         step = OtpLoginStep.PROFILE_SETUP,
                         phone = normalizedPhone,
                         verifiedUserId = derivedId,
                         verifiedToken = resp.resolvedToken(),
-                        prefilledName = resp.resolvedDisplayName().orEmpty(),
-                        avatarUrl = resp.resolvedAvatarUrl(),
+                        prefilledName = prefilledName,
+                        avatarUrl = prefilledAvatar,
                         telegramBotUrl = null,
                         isLoading = false,
                         errorMessage = null,
@@ -194,12 +216,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { err ->
                 if (com.example.data.repository.PhoneAuthUtils.isProfileSetupRequiredError(null, err.message)) {
                     countdownJob?.cancel()
-                    val derivedId = "u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone }
+                    val cachedUser = repository.findCachedUserProfile(normalizedPhone, null)
+                    val derivedId = cachedUser?.userId?.takeIf { it.isNotBlank() }
+                        ?: ("u_" + normalizedPhone.filter { it.isDigit() }.ifBlank { normalizedPhone })
+                    val prefilledName = cachedUser?.displayName?.takeIf { it.isNotBlank() && it != derivedId }.orEmpty()
                     _loginFlowState.update {
                         it.copy(
                             step = OtpLoginStep.PROFILE_SETUP,
                             phone = normalizedPhone,
                             verifiedUserId = derivedId,
+                            prefilledName = prefilledName,
+                            avatarUrl = cachedUser?.avatarUrl,
                             telegramBotUrl = null,
                             isLoading = false,
                             errorMessage = null,
@@ -338,12 +365,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         GlobalSecurityEventBus.clearBlocked()
     }
 
-    fun logout() {
+    fun logout(onLoggedOut: (() -> Unit)? = null) {
         viewModelScope.launch {
+            countdownJob?.cancel()
             app.stopBackgroundSignalingService()
             repository.logout()
+            GlobalSecurityEventBus.clearBlocked()
             val deviceId = repository.getDeviceLockId()
             _loginFlowState.value = LoginFlowState(deviceId = deviceId)
+            onLoggedOut?.invoke()
         }
     }
 }

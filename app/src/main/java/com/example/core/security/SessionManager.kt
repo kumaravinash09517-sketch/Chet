@@ -41,6 +41,27 @@ class SessionManager(private val context: Context) {
     companion object {
         private val KEY_ENCRYPTED_SESSION = stringPreferencesKey("encrypted_user_session")
         private val KEY_DEVICE_LOCK_SECRET = stringPreferencesKey("encrypted_device_lock_id")
+        fun isAllowedForActiveLock(
+            existingUserId: String,
+            existingPhone: String,
+            candidateUserId: String,
+            candidatePhone: String
+        ): Boolean {
+            val sameId = existingUserId.equals(candidateUserId.trim(), ignoreCase = true)
+            val existingDigits = normalizeCompareDigits(existingPhone)
+            val candidateDigits = normalizeCompareDigits(candidatePhone)
+            val samePhone = candidateDigits.isNotEmpty() && existingDigits == candidateDigits
+            return sameId || samePhone
+        }
+
+        private fun normalizeCompareDigits(raw: String): String {
+            val digits = raw.filter { it.isDigit() }
+            return when {
+                digits.length == 10 -> "91$digits"
+                digits.length == 11 && digits.startsWith("0") -> "91${digits.drop(1)}"
+                else -> digits
+            }
+        }
     }
 
     val sessionFlow: Flow<UserSession?> = context.secureSessionDataStore.data.map { prefs ->
@@ -87,10 +108,12 @@ class SessionManager(private val context: Context) {
      */
     suspend fun canRegisterUser(candidateUserId: String, candidatePhone: String = ""): Boolean {
         val existing = getCurrentSession() ?: return true
-        val sameId = existing.userId.equals(candidateUserId.trim(), ignoreCase = true)
-        val samePhone = candidatePhone.isNotBlank() &&
-            existing.phone.filter { it.isDigit() } == candidatePhone.filter { it.isDigit() }
-        return sameId || samePhone
+        return isAllowedForActiveLock(
+            existingUserId = existing.userId,
+            existingPhone = existing.phone,
+            candidateUserId = candidateUserId,
+            candidatePhone = candidatePhone
+        )
     }
 
     suspend fun saveSession(
