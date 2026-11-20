@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,24 +49,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var conversationJob: Job? = null
     private var typingTimeoutJob: Job? = null
     private var liveLocationJob: Job? = null
+    private var periodicSyncJob: Job? = null
 
     fun bindConversation(peerId: String, peerName: String) {
-        if (_currentPeerId.value == peerId) return
+        val samePeer = _currentPeerId.value == peerId
         _currentPeerId.value = peerId
         _currentPeerName.value = peerName
 
-        messagesJob?.cancel()
-        messagesJob = viewModelScope.launch {
-            repository.observeMessages(peerId).collect { list ->
-                _messages.value = list
+        if (!samePeer) {
+            messagesJob?.cancel()
+            messagesJob = viewModelScope.launch {
+                repository.observeMessages(peerId).collect { list ->
+                    _messages.value = list
+                }
             }
-        }
 
-        conversationJob?.cancel()
-        conversationJob = viewModelScope.launch {
-            repository.conversationsFlow.collect { convs: List<ConversationEntity> ->
-                val conv = convs.firstOrNull { it.peerId == peerId }
-                _isPeerTyping.value = conv?.isPeerTyping == true
+            conversationJob?.cancel()
+            conversationJob = viewModelScope.launch {
+                repository.conversationsFlow.collect { convs: List<ConversationEntity> ->
+                    val conv = convs.firstOrNull { it.peerId == peerId }
+                    _isPeerTyping.value = conv?.isPeerTyping == true
+                }
+            }
+
+            periodicSyncJob?.cancel()
+            periodicSyncJob = viewModelScope.launch {
+                while (isActive) {
+                    val wsUp = app.signalingClient.isConnected.value
+                    delay(if (wsUp) 10_000L else 4_000L)
+                    repository.retryPendingMessages(peerId)
+                    repository.syncMessagesWithServer(peerId)
+                }
             }
         }
 
@@ -225,6 +239,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         liveLocationJob?.cancel()
+        periodicSyncJob?.cancel()
         super.onCleared()
     }
 }

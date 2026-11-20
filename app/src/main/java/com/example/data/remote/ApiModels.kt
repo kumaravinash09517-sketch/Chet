@@ -198,6 +198,7 @@ data class RegisterUserResponse(
     @Json(name = "id") val idTopLevel: String? = null,
     @Json(name = "displayName") val displayName: String? = null,
     @Json(name = "display_name") val displayNameSnake: String? = null,
+    @Json(name = "name") val nameTopLevel: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
     @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
@@ -207,6 +208,18 @@ data class RegisterUserResponse(
 ) {
     fun resolvedToken(): String? =
         token?.takeIf { it.isNotBlank() } ?: accessToken?.takeIf { it.isNotBlank() }
+
+    fun resolvedUserId(): String? =
+        userId?.trim()?.takeIf { it.isNotBlank() }
+            ?: userIdSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: idTopLevel?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedUserId()?.takeIf { it.isNotBlank() }
+
+    fun resolvedDisplayName(): String? =
+        displayName?.trim()?.takeIf { it.isNotBlank() }
+            ?: displayNameSnake?.trim()?.takeIf { it.isNotBlank() }
+            ?: nameTopLevel?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedDisplayName()?.takeIf { it.isNotBlank() }
 
     fun resolvedAvatarUrl(): String? =
         avatarUrl?.takeIf { it.isNotBlank() }
@@ -297,13 +310,44 @@ data class SendMessageRequest(
     @Json(name = "longitude") val longitude: Double? = null,
     @Json(name = "liveLocationActive") val liveLocationActive: Boolean = false,
     @Json(name = "timestamp") val timestamp: Long
+) {
+    fun toSnakeCase(): SendMessageSnakeCaseRequest = SendMessageSnakeCaseRequest(
+        id = id,
+        senderId = senderId,
+        receiverId = receiverId,
+        content = content,
+        type = type,
+        mediaUrl = mediaUrl,
+        fileName = fileName,
+        fileSizeBytes = fileSizeBytes,
+        latitude = latitude,
+        longitude = longitude,
+        liveLocationActive = liveLocationActive,
+        timestamp = timestamp
+    )
+}
+
+@JsonClass(generateAdapter = true)
+data class SendMessageSnakeCaseRequest(
+    @Json(name = "id") val id: String,
+    @Json(name = "sender_id") val senderId: String,
+    @Json(name = "receiver_id") val receiverId: String,
+    @Json(name = "content") val content: String,
+    @Json(name = "type") val type: String,
+    @Json(name = "media_url") val mediaUrl: String? = null,
+    @Json(name = "file_name") val fileName: String? = null,
+    @Json(name = "file_size_bytes") val fileSizeBytes: Long? = null,
+    @Json(name = "latitude") val latitude: Double? = null,
+    @Json(name = "longitude") val longitude: Double? = null,
+    @Json(name = "live_location_active") val liveLocationActive: Boolean = false,
+    @Json(name = "timestamp") val timestamp: Long
 )
 
 @JsonClass(generateAdapter = true)
 data class RemoteMessageDto(
-    @Json(name = "id") val id: String,
-    @Json(name = "senderId") val senderId: String,
-    @Json(name = "receiverId") val receiverId: String,
+    @Json(name = "id") val id: String = "",
+    @Json(name = "senderId") val senderId: String = "",
+    @Json(name = "receiverId") val receiverId: String = "",
     @Json(name = "content") val content: String = "",
     @Json(name = "type") val type: String = "TEXT",
     @Json(name = "mediaUrl") val mediaUrl: String? = null,
@@ -345,3 +389,208 @@ data class BasicSuccessResponse(
     @Json(name = "success") val success: Boolean = true,
     @Json(name = "message") val message: String? = null
 )
+
+object BackendJsonParsers {
+
+    fun parseUsersFromBody(rawJson: String?): List<RemoteUserDto> {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return emptyList()
+        return runCatching {
+            when {
+                trimmed.startsWith("[") -> {
+                    val arr = org.json.JSONArray(trimmed)
+                    parseUserArray(arr)
+                }
+                trimmed.startsWith("{") -> {
+                    val obj = org.json.JSONObject(trimmed)
+                    val arrayKeys = listOf("users", "data", "results", "items", "directory")
+                    val array = arrayKeys.firstNotNullOfOrNull { key -> obj.optJSONArray(key) }
+                    if (array != null) {
+                        parseUserArray(array)
+                    } else {
+                        val singleObj = obj.optJSONObject("user") ?: obj
+                        listOfNotNull(parseSingleUser(singleObj))
+                    }
+                }
+                else -> emptyList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun parseUserArray(arr: org.json.JSONArray): List<RemoteUserDto> {
+        val result = mutableListOf<RemoteUserDto>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            parseSingleUser(item)?.let { result.add(it) }
+        }
+        return result
+    }
+
+    private fun parseSingleUser(obj: org.json.JSONObject): RemoteUserDto? {
+        val uid = firstNonBlankString(obj, "userId", "user_id", "id") ?: return null
+        val displayName = firstNonBlankString(obj, "displayName", "display_name", "name", "username")
+        val phone = firstNonBlankString(obj, "phone", "phone_number", "phoneNumber", "mobile")
+        val avatarUrl = firstNonBlankString(obj, "avatarUrl", "avatar_url", "avatar", "photoUrl", "photo_url")
+        val millis = parseTimestampMillis(
+            obj,
+            "lastLoginMillis",
+            "last_login_millis",
+            "loginTimestamp",
+            "login_timestamp",
+            "lastLogin",
+            "last_login",
+            "lastSeen",
+            "last_seen",
+            "updatedAt",
+            "updated_at"
+        )
+        val formatted = firstNonBlankString(
+            obj,
+            "lastLoginFormatted",
+            "last_login_formatted",
+            "loginDateFormatted",
+            "login_date_formatted"
+        )
+        val isOnline = obj.optBoolean("isOnline", obj.optBoolean("is_online", false))
+        val isBlocked = obj.optBoolean("isBlocked", obj.optBoolean("is_blocked", false))
+        val deviceId = firstNonBlankString(obj, "device_id", "deviceId", "deviceLockId")
+        return RemoteUserDto(
+            userId = uid,
+            displayName = displayName,
+            phone = phone,
+            avatarUrl = avatarUrl,
+            lastLoginMillis = millis,
+            lastLoginFormatted = formatted,
+            isOnline = isOnline,
+            isBlocked = isBlocked,
+            deviceIdSnake = deviceId
+        )
+    }
+
+    fun parseMessagesFromBody(rawJson: String?): List<RemoteMessageDto> {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return emptyList()
+        return runCatching {
+            when {
+                trimmed.startsWith("[") -> {
+                    parseMessageArray(org.json.JSONArray(trimmed))
+                }
+                trimmed.startsWith("{") -> {
+                    val obj = org.json.JSONObject(trimmed)
+                    val arrayKeys = listOf("messages", "data", "results", "items")
+                    val array = arrayKeys.firstNotNullOfOrNull { key -> obj.optJSONArray(key) }
+                    if (array != null) {
+                        parseMessageArray(array)
+                    } else {
+                        val single = obj.optJSONObject("message") ?: obj.optJSONObject("data") ?: obj
+                        listOfNotNull(parseSingleMessage(single))
+                    }
+                }
+                else -> emptyList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun parseMessageArray(arr: org.json.JSONArray): List<RemoteMessageDto> {
+        val result = mutableListOf<RemoteMessageDto>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            parseSingleMessage(item)?.let { result.add(it) }
+        }
+        return result
+    }
+
+    fun parseSingleMessage(obj: org.json.JSONObject): RemoteMessageDto? {
+        val id = firstNonBlankString(obj, "id", "messageId", "message_id", "_id") ?: return null
+        val senderId = firstNonBlankString(obj, "senderId", "sender_id", "from", "fromUserId") ?: return null
+        val receiverId = firstNonBlankString(obj, "receiverId", "receiver_id", "to", "toUserId").orEmpty()
+        val content = firstNonBlankString(obj, "content", "text", "body")
+            ?: obj.optString("message").takeIf { it.isNotBlank() && it != "null" && !it.startsWith("{") }
+            ?: ""
+        val rawType = firstNonBlankString(obj, "messageType", "message_type", "type") ?: "TEXT"
+        val normalizedType = if (rawType.equals("chat_message", ignoreCase = true) ||
+            rawType.equals("message", ignoreCase = true)
+        ) {
+            "TEXT"
+        } else {
+            rawType.uppercase()
+        }
+        val mediaUrl = firstNonBlankString(obj, "mediaUrl", "media_url", "fileUrl", "file_url")
+        val fileName = firstNonBlankString(obj, "fileName", "file_name")
+        val fileSizeBytes = listOf("fileSizeBytes", "file_size_bytes", "sizeBytes", "size_bytes")
+            .firstOrNull { obj.has(it) && !obj.isNull(it) }
+            ?.let { obj.optLong(it) }
+        val latitude = if (obj.has("latitude") && !obj.isNull("latitude")) obj.optDouble("latitude") else null
+        val longitude = if (obj.has("longitude") && !obj.isNull("longitude")) obj.optDouble("longitude") else null
+        val liveLocationActive = obj.optBoolean(
+            "liveLocationActive",
+            obj.optBoolean("live_location_active", false)
+        )
+        val status = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
+        val timestamp = parseTimestampMillis(
+            obj,
+            "timestamp",
+            "createdAt",
+            "created_at",
+            "sentAt",
+            "sent_at"
+        ) ?: System.currentTimeMillis()
+
+        return RemoteMessageDto(
+            id = id,
+            senderId = senderId,
+            receiverId = receiverId,
+            content = content,
+            type = normalizedType,
+            mediaUrl = mediaUrl,
+            fileName = fileName,
+            fileSizeBytes = fileSizeBytes,
+            latitude = latitude,
+            longitude = longitude,
+            liveLocationActive = liveLocationActive,
+            status = status,
+            timestamp = timestamp
+        )
+    }
+
+    fun parseSendMessageStatus(rawJson: String?): String? {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty() || !trimmed.startsWith("{")) return null
+        return runCatching {
+            val obj = org.json.JSONObject(trimmed)
+            val nested = obj.optJSONObject("message") ?: obj.optJSONObject("data")
+            val status = firstNonBlankString(obj, "status")
+                ?: nested?.let { firstNonBlankString(it, "status") }
+            status?.uppercase()?.takeIf { it in setOf("SENT", "DELIVERED", "READ") }
+        }.getOrNull()
+    }
+
+    private fun firstNonBlankString(obj: org.json.JSONObject, vararg keys: String): String? {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            val value = obj.optString(key).trim()
+            if (value.isNotBlank() && !value.equals("null", ignoreCase = true)) {
+                return value
+            }
+        }
+        return null
+    }
+
+    private fun parseTimestampMillis(obj: org.json.JSONObject, vararg keys: String): Long? {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            val rawLong = obj.optLong(key, -1L)
+            if (rawLong > 0L) {
+                return if (rawLong < 10_000_000_000L) rawLong * 1000L else rawLong
+            }
+            val rawStr = obj.optString(key).trim()
+            if (rawStr.isNotEmpty() && !rawStr.equals("null", ignoreCase = true)) {
+                rawStr.toLongOrNull()?.let { parsed ->
+                    if (parsed > 0L) return if (parsed < 10_000_000_000L) parsed * 1000L else parsed
+                }
+            }
+        }
+        return null
+    }
+}
+

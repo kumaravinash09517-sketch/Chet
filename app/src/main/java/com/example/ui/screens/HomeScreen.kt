@@ -95,6 +95,7 @@ fun HomeScreen(
     totalUnreadCount: Int,
     searchQuery: String,
     isDirectorySyncing: Boolean,
+    isSearchingUsers: Boolean = false,
     serverStatus: ServerStatus,
     wsConnected: Boolean,
     hasContactPermission: () -> Boolean,
@@ -119,23 +120,41 @@ fun HomeScreen(
 
     val filteredConversations = remember(conversations, searchQuery) {
         if (searchQuery.isBlank()) conversations
-        else conversations.filter {
-            it.peerName.contains(searchQuery, ignoreCase = true) ||
-                it.peerPhone.contains(searchQuery, ignoreCase = true) ||
-                it.peerId.contains(searchQuery, ignoreCase = true) ||
-                it.lastMessagePreview.contains(searchQuery, ignoreCase = true)
+        else {
+            val q = searchQuery.trim()
+            val qDigits = q.filter { it.isDigit() }
+            conversations.filter {
+                it.peerName.contains(q, ignoreCase = true) ||
+                    it.peerPhone.contains(q, ignoreCase = true) ||
+                    it.peerId.contains(q, ignoreCase = true) ||
+                    it.lastMessagePreview.contains(q, ignoreCase = true) ||
+                    (qDigits.length >= 4 && (
+                        it.peerPhone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
+                            it.peerId.filter { ch -> ch.isDigit() }.contains(qDigits)
+                        ))
+            }
         }
     }
 
     val filteredUsers = remember(directoryUsers, remoteSearchResults, searchQuery) {
-        val merged = (directoryUsers + remoteSearchResults)
+        val merged = (remoteSearchResults + directoryUsers)
             .distinctBy { it.userId }
             .sortedByDescending { it.lastLoginMillis }
         if (searchQuery.isBlank()) merged
-        else merged.filter {
-            it.displayName.contains(searchQuery, ignoreCase = true) ||
-                it.phone.contains(searchQuery, ignoreCase = true) ||
-                it.userId.contains(searchQuery, ignoreCase = true)
+        else {
+            val q = searchQuery.trim()
+            val qDigits = q.filter { it.isDigit() }
+            val remoteIds = remoteSearchResults.map { it.userId }.toSet()
+            merged.filter { user ->
+                user.userId in remoteIds ||
+                    user.displayName.contains(q, ignoreCase = true) ||
+                    user.phone.contains(q, ignoreCase = true) ||
+                    user.userId.contains(q, ignoreCase = true) ||
+                    (qDigits.length >= 4 && (
+                        user.phone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
+                            user.userId.filter { ch -> ch.isDigit() }.contains(qDigits)
+                        ))
+            }
         }
     }
 
@@ -143,7 +162,9 @@ fun HomeScreen(
         if (searchQuery.isBlank()) emptyList()
         else {
             val existingPeerIds = filteredConversations.map { it.peerId }.toSet()
-            filteredUsers.filter { it.userId != session.userId && it.userId !in existingPeerIds }
+            filteredUsers.filter {
+                !it.userId.equals(session.userId, ignoreCase = true) && it.userId !in existingPeerIds
+            }
         }
     }
 
@@ -283,7 +304,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (isDirectorySyncing || serverStatus == ServerStatus.WAKING_UP) {
+            if (isDirectorySyncing || isSearchingUsers || serverStatus == ServerStatus.WAKING_UP) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
@@ -368,10 +389,27 @@ fun HomeScreen(
                 }
             } else {
                 if (filteredUsers.isEmpty()) {
-                    EmptyHomeState(
-                        title = "Directory empty",
-                        subtitle = "Tap Refresh or search by phone number to sync registered users."
-                    )
+                    val cleanQuery = searchQuery.trim()
+                    when {
+                        isDirectorySyncing || isSearchingUsers -> {
+                            EmptyHomeState(
+                                title = "Searching directory…",
+                                subtitle = "Syncing registered users from Hello Sir server."
+                            )
+                        }
+                        cleanQuery.isNotEmpty() -> {
+                            EmptyHomeState(
+                                title = "No matching user found for \"$cleanQuery\"",
+                                subtitle = "Check the phone number, name, or user ID (e.g. u_919455877902), or tap Refresh."
+                            )
+                        }
+                        else -> {
+                            EmptyHomeState(
+                                title = "Directory empty",
+                                subtitle = "Tap Refresh or search by phone number to sync registered users."
+                            )
+                        }
+                    }
                 } else {
                     LazyColumn(
                         contentPadding = PaddingValues(bottom = 88.dp),
@@ -381,11 +419,12 @@ fun HomeScreen(
                             items = filteredUsers,
                             key = { it.userId }
                         ) { user ->
+                            val isSelfUser = user.userId.equals(session.userId, ignoreCase = true)
                             RegisteredUserRow(
                                 user = user,
-                                isSelf = user.userId == session.userId,
+                                isSelf = isSelfUser,
                                 onClick = {
-                                    if (user.userId != session.userId) {
+                                    if (!isSelfUser) {
                                         onOpenChat(user.userId, user.displayName)
                                     } else {
                                         onOpenProfileSettings()

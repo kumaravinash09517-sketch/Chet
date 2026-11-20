@@ -87,6 +87,9 @@ interface MessageDao {
     )
     suspend fun getLatestActiveMessage(conversationId: String): MessageEntity?
 
+    @Query("SELECT * FROM messages WHERE status = 'PENDING' AND isDeleted = 0 ORDER BY timestamp ASC")
+    suspend fun getPendingMessages(): List<MessageEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertMessage(message: MessageEntity)
 

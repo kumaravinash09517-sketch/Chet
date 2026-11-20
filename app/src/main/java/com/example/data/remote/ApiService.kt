@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
@@ -27,10 +28,30 @@ interface ApiService {
     suspend fun registerUser(@Body request: RegisterUserRequest): Response<RegisterUserResponse>
 
     @GET("api/users")
-    suspend fun getUserDirectory(): Response<UserDirectoryResponse>
+    suspend fun getUserDirectory(): Response<ResponseBody>
+
+    @GET("api/users/find")
+    suspend fun findUsers(
+        @Query("q") q: String
+    ): Response<ResponseBody>
+
+    @GET("api/users/find")
+    suspend fun findUsersByQuery(
+        @Query("query") query: String
+    ): Response<ResponseBody>
+
+    @GET("api/users/find")
+    suspend fun findUsersByPhone(
+        @Query("phone") phone: String
+    ): Response<ResponseBody>
+
+    @GET("api/users/find")
+    suspend fun findUsersByUserId(
+        @Query("userId") userId: String
+    ): Response<ResponseBody>
 
     @GET("api/users/search")
-    suspend fun searchUsers(@Query("q") query: String): Response<UserDirectoryResponse>
+    suspend fun searchUsers(@Query("q") query: String): Response<ResponseBody>
 
     @POST("api/webhooks/admin-event")
     suspend fun sendAdminWebhook(@Body request: AdminWebhookEventRequest): Response<BasicSuccessResponse>
@@ -39,10 +60,13 @@ interface ApiService {
     suspend fun getMessages(
         @Path("peerId") peerId: String,
         @Query("userId") currentUserId: String
-    ): Response<MessagesListResponse>
+    ): Response<ResponseBody>
 
     @POST("api/messages")
-    suspend fun sendMessage(@Body request: SendMessageRequest): Response<RemoteMessageDto>
+    suspend fun sendMessage(@Body request: SendMessageRequest): Response<ResponseBody>
+
+    @POST("api/messages")
+    suspend fun sendMessageSnakeCase(@Body request: SendMessageSnakeCaseRequest): Response<ResponseBody>
 
     @DELETE("api/messages/{messageId}")
     suspend fun deleteMessage(

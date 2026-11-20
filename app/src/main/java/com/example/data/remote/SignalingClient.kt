@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import android.net.Uri
 import com.example.core.security.GlobalSecurityEventBus
 import com.example.core.security.ServerStatus
 import com.example.core.security.SessionManager
@@ -24,6 +25,8 @@ import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 sealed interface SignalingEvent {
+    data object SocketConnected : SignalingEvent
+    data object DirectoryUpdated : SignalingEvent
     data class ChatMessageReceived(val dto: RemoteMessageDto) : SignalingEvent
     data class MessageDeleted(val messageId: String, val conversationId: String) : SignalingEvent
     data class ReceiptUpdated(
@@ -97,7 +100,7 @@ class SignalingClient(
     private fun openSocket() {
         scope.launch {
             val session = sessionManager.getCurrentSession() ?: return@launch
-            val wsUrl = "${NetworkModule.WS_URL}?userId=${session.userId}&deviceLockId=${session.deviceLockId}"
+            val wsUrl = "${NetworkModule.WS_URL}?userId=${Uri.encode(session.userId)}&deviceLockId=${Uri.encode(session.deviceLockId)}"
             val request = Request.Builder()
                 .url(wsUrl)
                 .header("Authorization", "Bearer ${session.sessionToken}")
@@ -118,6 +121,7 @@ class SignalingClient(
                             put("deviceLockId", session.deviceLockId)
                         }
                     )
+                    _events.tryEmit(SignalingEvent.SocketConnected)
                     startHeartbeat(session.userId)
                 }
 
@@ -182,58 +186,58 @@ class SignalingClient(
     private fun parseAndDispatch(raw: String) {
         try {
             val json = JSONObject(raw)
+            val data = json.optJSONObject("data") ?: json
             when (json.optString("type")) {
                 "blocked", "error_403" -> {
                     GlobalSecurityEventBus.emitBlocked(
                         json.optString("message").ifBlank { "You are blocked by the administrator." }
                     )
                 }
+                "user_registered", "directory_updated" -> {
+                    _events.tryEmit(SignalingEvent.DirectoryUpdated)
+                }
                 "chat_message", "message" -> {
-                    val data = json.optJSONObject("data") ?: json
-                    val dto = RemoteMessageDto(
-                        id = data.optString("id"),
-                        senderId = data.optString("senderId"),
-                        receiverId = data.optString("receiverId"),
-                        content = data.optString("content"),
-                        type = data.optString("messageType", data.optString("type", "TEXT")),
-                        mediaUrl = data.optString("mediaUrl").takeIf { it.isNotBlank() && it != "null" },
-                        fileName = data.optString("fileName").takeIf { it.isNotBlank() && it != "null" },
-                        fileSizeBytes = if (data.has("fileSizeBytes") && !data.isNull("fileSizeBytes")) data.optLong("fileSizeBytes") else null,
-                        latitude = if (data.has("latitude") && !data.isNull("latitude")) data.optDouble("latitude") else null,
-                        longitude = if (data.has("longitude") && !data.isNull("longitude")) data.optDouble("longitude") else null,
-                        liveLocationActive = data.optBoolean("liveLocationActive", false),
-                        status = data.optString("status", "DELIVERED"),
-                        timestamp = data.optLong("timestamp", System.currentTimeMillis())
-                    )
-                    if (dto.id.isNotBlank() && dto.senderId.isNotBlank()) {
+                    val msgObj = json.optJSONObject("data") ?: json.optJSONObject("message") ?: json
+                    val dto = BackendJsonParsers.parseSingleMessage(msgObj)
+                    if (dto != null) {
                         _events.tryEmit(SignalingEvent.ChatMessageReceived(dto))
                     }
                 }
                 "delete_message" -> {
-                    val messageId = json.optString("messageId")
-                    val convId = json.optString("conversationId", json.optString("senderId"))
+                    val messageId = data.optString("messageId", data.optString("message_id"))
+                    val convId = data.optString(
+                        "conversationId",
+                        data.optString("senderId", data.optString("sender_id"))
+                    )
                     if (messageId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.MessageDeleted(messageId, convId))
                     }
                 }
                 "receipt", "read_receipt", "delivered_receipt" -> {
-                    val messageId = json.optString("messageId").takeIf { it.isNotBlank() }
-                    val convId = json.optString("peerId", json.optString("senderId"))
-                    val status = json.optString("status", "READ")
+                    val messageId = data.optString("messageId", data.optString("message_id"))
+                        .takeIf { it.isNotBlank() && it != "null" }
+                    val convId = data.optString(
+                        "peerId",
+                        data.optString("senderId", data.optString("sender_id"))
+                    )
+                    val status = data.optString("status", "READ")
                     if (convId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.ReceiptUpdated(messageId, convId, status))
                     }
                 }
                 "typing" -> {
-                    val userId = json.optString("senderId", json.optString("userId"))
-                    val isTyping = json.optBoolean("isTyping", false)
+                    val userId = data.optString(
+                        "senderId",
+                        data.optString("sender_id", data.optString("userId", data.optString("user_id")))
+                    )
+                    val isTyping = data.optBoolean("isTyping", data.optBoolean("is_typing", false))
                     if (userId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.TypingStatusChanged(userId, isTyping))
                     }
                 }
                 "presence" -> {
-                    val userId = json.optString("userId")
-                    val online = json.optBoolean("isOnline", false)
+                    val userId = data.optString("userId", data.optString("user_id"))
+                    val online = data.optBoolean("isOnline", data.optBoolean("is_online", false))
                     if (userId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.PresenceChanged(userId, online))
                     }
@@ -241,47 +245,61 @@ class SignalingClient(
                 "live_location" -> {
                     _events.tryEmit(
                         SignalingEvent.LiveLocationUpdated(
-                            messageId = json.optString("messageId"),
-                            senderId = json.optString("senderId"),
-                            latitude = json.optDouble("latitude"),
-                            longitude = json.optDouble("longitude"),
-                            active = json.optBoolean("active", true)
+                            messageId = data.optString("messageId", data.optString("message_id")),
+                            senderId = data.optString("senderId", data.optString("sender_id")),
+                            latitude = data.optDouble("latitude"),
+                            longitude = data.optDouble("longitude"),
+                            active = data.optBoolean("active", true)
                         )
                     )
                 }
                 "call_offer", "offer" -> {
-                    _events.tryEmit(
-                        SignalingEvent.IncomingCallOffer(
-                            callId = json.optString("callId", System.currentTimeMillis().toString()),
-                            callerId = json.optString("callerId", json.optString("senderId")),
-                            callerName = json.optString("callerName", json.optString("callerId")),
-                            isVideo = json.optBoolean("isVideo", false),
-                            sdp = json.optString("sdp")
+                    val callerId = firstNonBlank(data, "callerId", "caller_id", "senderId", "sender_id", "from")
+                    val callerName = firstNonBlank(data, "callerName", "caller_name", "senderName") ?: callerId.orEmpty()
+                    val sdp = data.optString("sdp")
+                    if (!callerId.isNullOrBlank() && sdp.isNotBlank()) {
+                        _events.tryEmit(
+                            SignalingEvent.IncomingCallOffer(
+                                callId = data.optString("callId", System.currentTimeMillis().toString()),
+                                callerId = callerId,
+                                callerName = callerName,
+                                isVideo = data.optBoolean("isVideo", data.optBoolean("is_video", false)),
+                                sdp = sdp
+                            )
                         )
-                    )
+                    }
                 }
                 "call_answer", "answer" -> {
-                    _events.tryEmit(
-                        SignalingEvent.CallAnswerReceived(
-                            callerId = json.optString("senderId", json.optString("callerId")),
-                            sdp = json.optString("sdp")
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "callerId", "caller_id", "peerId", "from")
+                    val sdp = data.optString("sdp")
+                    if (!peerId.isNullOrBlank() && sdp.isNotBlank()) {
+                        _events.tryEmit(
+                            SignalingEvent.CallAnswerReceived(
+                                callerId = peerId,
+                                sdp = sdp
+                            )
                         )
-                    )
+                    }
                 }
                 "ice_candidate" -> {
-                    _events.tryEmit(
-                        SignalingEvent.IceCandidateReceived(
-                            senderId = json.optString("senderId"),
-                            sdpMid = json.optString("sdpMid"),
-                            sdpMLineIndex = json.optInt("sdpMLineIndex", 0),
-                            candidate = json.optString("candidate")
+                    val senderId = firstNonBlank(data, "senderId", "sender_id", "from").orEmpty()
+                    val candidate = data.optString("candidate")
+                    if (candidate.isNotBlank()) {
+                        _events.tryEmit(
+                            SignalingEvent.IceCandidateReceived(
+                                senderId = senderId,
+                                sdpMid = data.optString("sdpMid", data.optString("sdp_mid")),
+                                sdpMLineIndex = data.optInt("sdpMLineIndex", data.optInt("sdp_m_line_index", 0)),
+                                candidate = candidate
+                            )
                         )
-                    )
+                    }
                 }
                 "call_end", "call_reject" -> {
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "peerId", "callerId", "from").orEmpty()
                     _events.tryEmit(
                         SignalingEvent.CallEnded(
-                            peerId = json.optString("senderId", json.optString("peerId")),
+                            peerId = peerId,
                             reason = json.optString("type")
                         )
                     )
@@ -290,6 +308,17 @@ class SignalingClient(
         } catch (_: Exception) {
             // Ignore malformed non-JSON heartbeat frames
         }
+    }
+
+    private fun firstNonBlank(obj: JSONObject, vararg keys: String): String? {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            val value = obj.optString(key).trim()
+            if (value.isNotBlank() && !value.equals("null", ignoreCase = true)) {
+                return value
+            }
+        }
+        return null
     }
 
     fun sendChatMessage(request: SendMessageRequest): Boolean {

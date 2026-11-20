@@ -1,6 +1,14 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Outline
+import android.view.View
+import android.view.ViewOutlineProvider
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,7 +39,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,6 +54,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.example.rtc.CallState
 import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.EmeraldPrimary
@@ -54,11 +67,15 @@ import java.util.Locale
 @Composable
 fun CallScreen(
     callState: CallState,
+    eglBaseContext: EglBase.Context,
     isMuted: Boolean,
     isSpeakerOn: Boolean,
     isVideoEnabled: Boolean,
+    isFrontCamera: Boolean,
+    hasRemoteVideo: Boolean,
     durationSeconds: Long,
     onAttachRenderers: (local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) -> Unit,
+    onCameraPermissionGranted: () -> Unit,
     onAcceptIncoming: () -> Unit,
     onDeclineIncoming: () -> Unit,
     onHangUp: () -> Unit,
@@ -68,21 +85,23 @@ fun CallScreen(
     onSwitchCamera: () -> Unit
 ) {
     val context = LocalContext.current
+    var pendingAcceptAfterPermission by remember { mutableStateOf(false) }
 
-    val eglBase = remember { EglBase.create() }
-    val remoteView = remember {
+    val remoteView = remember(eglBaseContext) {
         SurfaceViewRenderer(context).apply {
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            setEnableHardwareScaler(true)
             setMirror(false)
-            init(eglBase.eglBaseContext, null)
+            init(eglBaseContext, null)
         }
     }
-    val localView = remember {
+    val localView = remember(eglBaseContext) {
         SurfaceViewRenderer(context).apply {
             setZOrderMediaOverlay(true)
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            setEnableHardwareScaler(true)
             setMirror(true)
-            init(eglBase.eglBaseContext, null)
+            init(eglBaseContext, null)
         }
     }
 
@@ -93,11 +112,50 @@ fun CallScreen(
         else -> false
     }
 
+    val isActiveCall = callState !is CallState.Idle && callState !is CallState.Ended
+
+    val showRemoteVideo = isVideoCall && callState is CallState.Connected && hasRemoteVideo
     val showLocalPreview = isVideoCall && isVideoEnabled && (
         callState is CallState.OutgoingRinging || callState is CallState.Connected
     )
 
-    val showRemoteVideo = isVideoCall && callState is CallState.Connected
+    val callPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val micGranted = results[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val camGranted = results[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+        if (isVideoCall && camGranted) {
+            onCameraPermissionGranted()
+        }
+        if (pendingAcceptAfterPermission) {
+            pendingAcceptAfterPermission = false
+            if (micGranted) {
+                onAcceptIncoming()
+            }
+        }
+    }
+
+    // Request CAMERA / RECORD_AUDIO automatically if an active video call lacks runtime permissions
+    LaunchedEffect(isVideoCall, callState) {
+        if (isVideoCall && (callState is CallState.OutgoingRinging || callState is CallState.Connected)) {
+            val missing = buildList {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    add(Manifest.permission.RECORD_AUDIO)
+                }
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    add(Manifest.permission.CAMERA)
+                }
+            }
+            if (missing.isNotEmpty()) {
+                callPermissionLauncher.launch(missing.toTypedArray())
+            } else {
+                onCameraPermissionGranted()
+            }
+        }
+    }
 
     val peerName = when (callState) {
         is CallState.OutgoingRinging -> callState.peerName
@@ -114,8 +172,8 @@ fun CallScreen(
         CallState.Idle -> ""
     }
 
-    DisposableEffect(isVideoCall, callState) {
-        if (isVideoCall && callState !is CallState.Idle && callState !is CallState.Ended) {
+    DisposableEffect(isVideoCall, isActiveCall) {
+        if (isVideoCall && isActiveCall) {
             onAttachRenderers(localView, remoteView)
         } else {
             onAttachRenderers(null, null)
@@ -125,11 +183,10 @@ fun CallScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(remoteView, localView) {
         onDispose {
             runCatching { localView.release() }
             runCatching { remoteView.release() }
-            runCatching { eglBase.release() }
         }
     }
 
@@ -141,10 +198,8 @@ fun CallScreen(
                     colors = listOf(ObsidianBackground, Color(0xFF0A241C), ObsidianBackground)
                 )
             )
-            .statusBarsPadding()
-            .navigationBarsPadding()
     ) {
-        // Remote Video Surface
+        // Remote Video Surface (full-screen background when connected & video received)
         if (showRemoteVideo) {
             AndroidView(
                 factory = { remoteView },
@@ -155,37 +210,75 @@ fun CallScreen(
             )
         }
 
-        // Local Self-Camera PiP Preview
+        // Local Self-Camera Preview:
+        // Full-screen while dialing / waiting for remote video, then top-right PiP once remote video arrives.
+        // Uses native ViewOutlineProvider instead of Compose Surface/graphicsLayer so SurfaceView hole-punch renders cleanly.
         if (showLocalPreview) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                shadowElevation = 6.dp,
-                color = Color.Black,
-                modifier = Modifier
+            val isPipMode = showRemoteVideo
+            val localContainerModifier = if (isPipMode) {
+                Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 20.dp, end = 16.dp)
-                    .size(width = 114.dp, height = 160.dp)
+                    .statusBarsPadding()
+                    .padding(top = 16.dp, end = 16.dp)
+                    .size(width = 116.dp, height = 164.dp)
+                    .border(1.5.dp, Color.White.copy(alpha = 0.65f), RoundedCornerShape(16.dp))
                     .testTag("local_camera_preview")
-            ) {
+            } else {
+                Modifier
+                    .fillMaxSize()
+                    .testTag("local_camera_preview")
+            }
+
+            Box(modifier = localContainerModifier) {
                 AndroidView(
                     factory = { localView },
                     update = { view ->
-                        view.setZOrderMediaOverlay(true)
-                        view.setMirror(true)
+                        view.setMirror(isFrontCamera)
+                        view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                        if (isPipMode) {
+                            view.clipToOutline = true
+                            view.outlineProvider = object : ViewOutlineProvider() {
+                                override fun getOutline(v: View, outline: Outline) {
+                                    val radius = 16f * v.resources.displayMetrics.density
+                                    outline.setRoundRect(0, 0, v.width, v.height, radius)
+                                }
+                            }
+                        } else {
+                            view.clipToOutline = false
+                            view.outlineProvider = ViewOutlineProvider.BACKGROUND
+                        }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
             }
         }
 
+        // Subtle scrim for readability over full-screen camera preview
+        if (showLocalPreview || showRemoteVideo) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.45f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.55f)
+                            )
+                        )
+                    )
+            )
+        }
+
         // Top Call Identity Header
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 48.dp),
+                .statusBarsPadding()
+                .padding(top = 40.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (!showRemoteVideo) {
+            if (!showRemoteVideo && !showLocalPreview) {
                 Box(
                     modifier = Modifier
                         .size(104.dp)
@@ -212,7 +305,7 @@ fun CallScreen(
             Text(
                 text = statusText,
                 style = MaterialTheme.typography.labelMedium,
-                color = Color.White.copy(alpha = 0.8f)
+                color = Color.White.copy(alpha = 0.88f)
             )
         }
 
@@ -220,6 +313,7 @@ fun CallScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp, vertical = 32.dp)
         ) {
@@ -258,7 +352,24 @@ fun CallScreen(
                                 .size(68.dp)
                                 .testTag("accept_call_button")
                         ) {
-                            IconButton(onClick = onAcceptIncoming) {
+                            IconButton(
+                                onClick = {
+                                    val missing = buildList {
+                                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                            add(Manifest.permission.RECORD_AUDIO)
+                                        }
+                                        if (isVideoCall && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                            add(Manifest.permission.CAMERA)
+                                        }
+                                    }
+                                    if (missing.isEmpty()) {
+                                        onAcceptIncoming()
+                                    } else {
+                                        pendingAcceptAfterPermission = true
+                                        callPermissionLauncher.launch(missing.toTypedArray())
+                                    }
+                                }
+                            ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Call,
                                     contentDescription = "Accept Call",

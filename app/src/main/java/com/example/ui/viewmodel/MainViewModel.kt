@@ -93,6 +93,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _remoteSearchResults = MutableStateFlow<List<UserEntity>>(emptyList())
     val remoteSearchResults: StateFlow<List<UserEntity>> = _remoteSearchResults.asStateFlow()
 
+    private val _isSearchingUsers = MutableStateFlow(false)
+    val isSearchingUsers: StateFlow<Boolean> = _isSearchingUsers.asStateFlow()
+
     private var countdownJob: Job? = null
     private var searchJob: Job? = null
 
@@ -119,11 +122,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchJob?.cancel()
         if (query.trim().length < 2) {
             _remoteSearchResults.value = emptyList()
+            _isSearchingUsers.value = false
             return
         }
+        _isSearchingUsers.value = true
         searchJob = viewModelScope.launch {
-            delay(300L)
-            _remoteSearchResults.value = repository.searchUsers(query)
+            try {
+                delay(250L)
+                _remoteSearchResults.value = repository.searchUsers(query)
+            } finally {
+                _isSearchingUsers.value = false
+            }
         }
     }
 

@@ -134,6 +134,7 @@ private fun HelloSirRoot(
     val totalUnread by mainViewModel.totalUnreadCount.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
     val isSyncing by mainViewModel.directorySyncing.collectAsStateWithLifecycle()
+    val isSearchingUsers by mainViewModel.isSearchingUsers.collectAsStateWithLifecycle()
     val serverStatus by mainViewModel.serverStatus.collectAsStateWithLifecycle()
     val wsConnected by mainViewModel.wsConnected.collectAsStateWithLifecycle()
     val loginFlowState by mainViewModel.loginFlowState.collectAsStateWithLifecycle()
@@ -158,15 +159,21 @@ private fun HelloSirRoot(
         val isMuted by callViewModel.isMuted.collectAsStateWithLifecycle()
         val isSpeaker by callViewModel.isSpeakerOn.collectAsStateWithLifecycle()
         val isVideoEnabled by callViewModel.isVideoEnabled.collectAsStateWithLifecycle()
+        val isFrontCamera by callViewModel.isFrontCamera.collectAsStateWithLifecycle()
+        val hasRemoteVideo by callViewModel.hasRemoteVideo.collectAsStateWithLifecycle()
         val duration by callViewModel.callDurationSeconds.collectAsStateWithLifecycle()
 
         CallScreen(
             callState = callState,
+            eglBaseContext = callViewModel.eglBaseContext,
             isMuted = isMuted,
             isSpeakerOn = isSpeaker,
             isVideoEnabled = isVideoEnabled,
+            isFrontCamera = isFrontCamera,
+            hasRemoteVideo = hasRemoteVideo,
             durationSeconds = duration,
             onAttachRenderers = { local, remote -> callViewModel.attachRenderers(local, remote) },
+            onCameraPermissionGranted = { callViewModel.onCameraPermissionGranted() },
             onAcceptIncoming = { callViewModel.acceptIncomingCall() },
             onDeclineIncoming = { callViewModel.declineIncomingCall() },
             onHangUp = { callViewModel.hangUp() },
@@ -223,6 +230,7 @@ private fun HelloSirRoot(
                         totalUnreadCount = totalUnread ?: 0,
                         searchQuery = searchQuery,
                         isDirectorySyncing = isSyncing,
+                        isSearchingUsers = isSearchingUsers,
                         serverStatus = serverStatus,
                         wsConnected = wsConnected,
                         hasContactPermission = { mainViewModel.hasContactPermission() },

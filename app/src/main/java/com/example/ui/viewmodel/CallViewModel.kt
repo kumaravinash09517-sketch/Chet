@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
@@ -29,6 +31,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = app.chatRepository
     private val signalingClient = app.signalingClient
 
+    private val eglBase: EglBase = EglBase.create()
+    val eglBaseContext: EglBase.Context get() = eglBase.eglBaseContext
+
     private val _callState = MutableStateFlow<CallState>(CallState.Idle)
     val callState: StateFlow<CallState> = _callState.asStateFlow()
 
@@ -40,6 +45,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isVideoEnabled = MutableStateFlow(true)
     val isVideoEnabled: StateFlow<Boolean> = _isVideoEnabled.asStateFlow()
+
+    private val _isFrontCamera = MutableStateFlow(true)
+    val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
+
+    private val _hasRemoteVideo = MutableStateFlow(false)
+    val hasRemoteVideo: StateFlow<Boolean> = _hasRemoteVideo.asStateFlow()
 
     private val _callDurationSeconds = MutableStateFlow(0L)
     val callDurationSeconds: StateFlow<Long> = _callDurationSeconds.asStateFlow()
@@ -66,6 +77,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                             activePeerId = event.callerId
                             activePeerName = event.callerName
                             activeIsVideo = event.isVideo
+                            _isVideoEnabled.value = event.isVideo
+                            _hasRemoteVideo.value = false
                             pendingRemoteIce.clear()
                             NotificationHelper.startRingtoneAndVibrate(app)
                             _callState.value = CallState.IncomingRinging(
@@ -115,20 +128,28 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startOutgoingCall(peerId: String, peerName: String, isVideo: Boolean) {
         viewModelScope.launch {
-            val mySession = app.sessionManager.getCurrentSession() ?: return@launch
+            app.sessionManager.getCurrentSession() ?: return@launch
             activePeerId = peerId
             activePeerName = peerName
             activeIsVideo = isVideo
             _isMuted.value = false
             _isSpeakerOn.value = isVideo
             _isVideoEnabled.value = isVideo
+            _isFrontCamera.value = true
+            _hasRemoteVideo.value = false
             pendingRemoteIce.clear()
 
             _callState.value = CallState.OutgoingRinging(peerId, peerName, isVideo)
+
+            // Open camera and local preview immediately without waiting for network ICE fetch
+            val client = ensureWebRtcClient()
+            client.prepareLocalMedia(isVideo = isVideo)
+            syncRenderersToClient()
+
             startActiveCallForegroundService(peerName, isVideo)
 
-            val iceServers = repository.fetchIceServers()
-            val client = ensureWebRtcClient()
+            val iceServers = withTimeoutOrNull(2_500L) { repository.fetchIceServers() }.orEmpty()
+            if (_callState.value !is CallState.OutgoingRinging) return@launch
             client.startPeerConnection(isVideo = isVideo, customIceServers = iceServers)
             syncRenderersToClient()
             client.createOffer(isVideo)
@@ -146,16 +167,36 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             _isMuted.value = false
             _isSpeakerOn.value = incoming.isVideo
             _isVideoEnabled.value = incoming.isVideo
+            _isFrontCamera.value = true
+            _hasRemoteVideo.value = false
+
+            // Transition immediately and open camera preview right away
+            transitionToConnected(incoming.callerId, incoming.callerName, incoming.isVideo)
+
+            val client = ensureWebRtcClient()
+            client.prepareLocalMedia(isVideo = incoming.isVideo)
+            syncRenderersToClient()
 
             startActiveCallForegroundService(incoming.callerName, incoming.isVideo)
 
-            val iceServers = repository.fetchIceServers()
-            val client = ensureWebRtcClient()
+            val iceServers = withTimeoutOrNull(2_500L) { repository.fetchIceServers() }.orEmpty()
+            if (_callState.value !is CallState.Connected) return@launch
             client.startPeerConnection(isVideo = incoming.isVideo, customIceServers = iceServers)
             syncRenderersToClient()
             client.handleRemoteOfferAndCreateAnswer(incoming.offerSdp, incoming.isVideo)
             drainPendingIce()
-            transitionToConnected(incoming.callerId, incoming.callerName, incoming.isVideo)
+        }
+    }
+
+    fun onCameraPermissionGranted() {
+        if (!activeIsVideo) return
+        val client = ensureWebRtcClient()
+        if (client.ensureVideoCaptureStarted()) {
+            _isVideoEnabled.value = true
+            syncRenderersToClient()
+            if (activePeerName.isNotBlank()) {
+                startActiveCallForegroundService(activePeerName, isVideo = true)
+            }
         }
     }
 
@@ -169,6 +210,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         activePeerId = callerId
         activePeerName = callerName
         activeIsVideo = isVideo
+        _isVideoEnabled.value = isVideo
+        _hasRemoteVideo.value = false
         _callState.value = CallState.IncomingRinging(
             callId = callId,
             callerId = callerId,
@@ -200,6 +243,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         timerJob?.cancel()
         timerJob = null
         _callDurationSeconds.value = 0L
+        _hasRemoteVideo.value = false
+        _isFrontCamera.value = true
 
         if (sendSignal && activePeerId.isNotBlank()) {
             viewModelScope.launch {
@@ -215,6 +260,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         attachedRemoteRenderer = null
         stopActiveCallForegroundService()
         activePeerId = ""
+        activePeerName = ""
+        activeIsVideo = false
         pendingRemoteIce.clear()
         _callState.value = CallState.Ended(reason)
 
@@ -270,6 +317,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         webRTCClient?.let { return it }
         val client = WebRTCClient(
             context = app,
+            eglBase = eglBase,
             onLocalSdpCreated = { sdp ->
                 viewModelScope.launch {
                     val session = app.sessionManager.getCurrentSession() ?: return@launch
@@ -315,7 +363,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     endCallLocally(sendSignal = false, reason = "Connection lost")
                 }
             },
-            onRemoteVideoTrack = { syncRenderersToClient() }
+            onRemoteVideoTrack = {
+                _hasRemoteVideo.value = true
+                syncRenderersToClient()
+            },
+            onCameraFacingChanged = { isFront ->
+                _isFrontCamera.value = isFront
+            }
         )
         webRTCClient = client
         return client
@@ -361,6 +415,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         runCatching { webRTCClient?.attachRenderers(null, null) }
         webRTCClient?.release()
+        runCatching { eglBase.release() }
         NotificationHelper.stopRingtoneAndVibrate(app)
         super.onCleared()
     }

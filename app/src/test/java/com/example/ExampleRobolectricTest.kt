@@ -274,6 +274,91 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `backendJsonParsers parses directory users, single find user, and raw arrays`() {
+        val wrapped = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """{"users":[{"userId":"u_919455877902","displayName":"avinash","phone":"+919455877902"},{"user_id":"u_919250903007","display_name":"sandeep","phone":"+919250903007"}]}"""
+        )
+        assertEquals(2, wrapped.size)
+        assertEquals("u_919455877902", wrapped[0].resolvedUserId())
+        assertEquals("avinash", wrapped[0].resolvedDisplayName())
+        assertEquals("u_919250903007", wrapped[1].resolvedUserId())
+        assertEquals("sandeep", wrapped[1].resolvedDisplayName())
+
+        val singleFind = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """{"user":{"id":"u_919455877902","name":"avinash","phone":"9455877902"}}"""
+        )
+        assertEquals(1, singleFind.size)
+        assertEquals("u_919455877902", singleFind.first().resolvedUserId())
+
+        val topLevelArray = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """[{"user_id":"u_919250903007","name":"sandeep","phone":"+919250903007"}]"""
+        )
+        assertEquals(1, topLevelArray.size)
+        assertEquals("sandeep", topLevelArray.first().resolvedDisplayName())
+    }
+
+    @Test
+    fun `backendJsonParsers parses messages and send ack statuses across JSON shapes`() {
+        val parsedMsgs = com.example.data.remote.BackendJsonParsers.parseMessagesFromBody(
+            """{"messages":[{"id":"m1","sender_id":"u_919455877902","receiver_id":"u_919250903007","text":"hi","status":"sent","timestamp":1763636348}]}"""
+        )
+        assertEquals(1, parsedMsgs.size)
+        assertEquals("m1", parsedMsgs.first().id)
+        assertEquals("u_919455877902", parsedMsgs.first().senderId)
+        assertEquals("u_919250903007", parsedMsgs.first().receiverId)
+        assertEquals("hi", parsedMsgs.first().content)
+        assertEquals("SENT", parsedMsgs.first().status)
+        assertEquals(1763636348000L, parsedMsgs.first().timestamp)
+
+        assertEquals(
+            "DELIVERED",
+            com.example.data.remote.BackendJsonParsers.parseSendMessageStatus("""{"success":true,"message":{"status":"delivered"}}""")
+        )
+        assertEquals(
+            null,
+            com.example.data.remote.BackendJsonParsers.parseSendMessageStatus("""{"success":true}""")
+        )
+    }
+
+    @Test
+    fun `getPendingMessages returns unsent messages for retry`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.messageDao()
+            dao.upsertMessage(
+                com.example.data.local.MessageEntity(
+                    id = "m_pending",
+                    conversationId = "u_919250903007",
+                    senderId = "u_919455877902",
+                    receiverId = "u_919250903007",
+                    content = "hi",
+                    status = MessageStatus.PENDING,
+                    timestamp = 1000L
+                )
+            )
+            dao.upsertMessage(
+                com.example.data.local.MessageEntity(
+                    id = "m_sent",
+                    conversationId = "u_919250903007",
+                    senderId = "u_919455877902",
+                    receiverId = "u_919250903007",
+                    content = "hello",
+                    status = MessageStatus.SENT,
+                    timestamp = 2000L
+                )
+            )
+            val pending = dao.getPendingMessages()
+            assertEquals(1, pending.size)
+            assertEquals("m_pending", pending.first().id)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun `403 blocklist event sets blocked state`() {
         GlobalSecurityEventBus.clearBlocked()
         GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
