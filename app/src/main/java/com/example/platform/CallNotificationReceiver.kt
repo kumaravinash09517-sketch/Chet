@@ -25,10 +25,24 @@ class CallNotificationReceiver : BroadcastReceiver() {
             ACTION_DECLINE_CALL -> {
                 NotificationHelper.stopRingtoneAndVibrate(context)
                 val callerId = intent.getStringExtra(NotificationHelper.EXTRA_CALLER_ID) ?: return
+                val callId = intent.getStringExtra(NotificationHelper.EXTRA_CALL_ID).orEmpty()
+                if (callId.isNotBlank()) {
+                    app.chatRepository.markCallDismissed(callId)
+                }
                 GlobalSecurityEventBus.emitCallAction(CallNotificationAction.Decline(callerId))
+                val pendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
-                    val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
-                    app.signalingClient.sendCallEnd(myId, callerId, isReject = true)
+                    try {
+                        val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
+                        app.signalingClient.sendCallEnd(myId, callerId, isReject = true, callId = callId)
+                        app.chatRepository.sendCallSignal(
+                            type = "decline",
+                            callId = callId.ifBlank { "decline_${System.currentTimeMillis()}" },
+                            receiverId = callerId
+                        )
+                    } finally {
+                        pendingResult.finish()
+                    }
                 }
             }
             ACTION_REPLY_MESSAGE -> {

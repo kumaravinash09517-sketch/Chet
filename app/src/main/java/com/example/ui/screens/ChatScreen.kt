@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,12 +37,14 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,6 +67,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -68,6 +75,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
@@ -103,6 +111,7 @@ fun ChatScreen(
     var showAttachmentSheet by remember { mutableStateOf(false) }
     var messageToDelete by remember { mutableStateOf<MessageEntity?>(null) }
     var previewImageUrl by remember { mutableStateOf<String?>(null) }
+    var previewVideoUrl by remember { mutableStateOf<String?>(null) }
     var pendingLocationAction by remember { mutableStateOf<Boolean?>(null) } // false = current, true = live
     var pendingCallIsVideo by remember { mutableStateOf<Boolean?>(null) }
     var showLocationRationale by remember { mutableStateOf(false) }
@@ -392,6 +401,7 @@ fun ChatScreen(
                         isMine = message.senderId == myUserId,
                         onLongPressDelete = { msg -> messageToDelete = msg },
                         onImagePreview = { url -> previewImageUrl = url },
+                        onVideoPreview = { url -> previewVideoUrl = url },
                         onStopLiveLocation = onStopLiveLocation
                     )
                 }
@@ -496,6 +506,97 @@ fun ChatScreen(
                         .fillMaxWidth()
                         .padding(8.dp)
                 )
+            }
+        }
+    }
+
+    if (previewVideoUrl != null) {
+        val videoSource = previewVideoUrl!!
+        Dialog(onDismissRequest = { previewVideoUrl = null }) {
+            var isBuffering by remember(videoSource) { mutableStateOf(true) }
+            var videoError by remember(videoSource) { mutableStateOf(false) }
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = Color.Black
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Video Player",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    runCatching {
+                                        val openUri = resolveExternalShareableUri(context, videoSource)
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(openUri, "video/*")
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                }
+                            ) {
+                                Text("Open External", color = Color.White)
+                            }
+                            IconButton(onClick = { previewVideoUrl = null }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Close video",
+                                    tint = Color.White
+                                )
+                            }
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(280.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                VideoView(ctx).apply {
+                                    val controller = MediaController(ctx)
+                                    controller.setAnchorView(this)
+                                    setMediaController(controller)
+                                    setOnPreparedListener { mp ->
+                                        isBuffering = false
+                                        mp.isLooping = false
+                                        start()
+                                    }
+                                    setOnErrorListener { _, _, _ ->
+                                        isBuffering = false
+                                        videoError = true
+                                        true
+                                    }
+                                    setVideoURI(Uri.parse(videoSource))
+                                    requestFocus()
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (isBuffering && !videoError) {
+                            CircularProgressIndicator(color = Color.White)
+                        } else if (videoError) {
+                            Text(
+                                text = "Unable to stream video in-app. Tap Open External.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
     }

@@ -423,4 +423,82 @@ class ExampleRobolectricTest {
         assertEquals("Sandeep", alert.senderName)
         assertEquals("Hello Sir, calling now", alert.headline)
     }
+
+    @Test
+    fun `parseCallSignalsFromBody parses offer, ringing, answer, ice, hangup, and decline across poll and active shapes`() {
+        val pollJson = """
+            {
+              "signals": [
+                {"id":"sig_1","type":"offer","call_id":"c_101","caller_id":"u_avinash","caller_name":"Avinash","receiver_id":"u_sandeep","is_video":true,"sdp":"v=0\r\noffer"},
+                {"id":"sig_2","type":"ringing","callId":"c_101","senderId":"u_sandeep","receiverId":"u_avinash"},
+                {"id":"sig_3","type":"ice","callId":"c_101","senderId":"u_avinash","receiverId":"u_sandeep","candidate":{"candidate":"candidate:1 1 UDP 2122252543 10.0.0.1 50000 typ host","sdpMid":"0","sdpMLineIndex":0}},
+                {"id":"sig_4","type":"answer","callId":"c_101","senderId":"u_sandeep","receiverId":"u_avinash","answer":{"sdp":"v=0\r\nanswer"}},
+                {"id":"sig_5","type":"decline","callId":"c_102","senderId":"u_sandeep","receiverId":"u_avinash"},
+                {"id":"sig_6","type":"hangup","callId":"c_101","senderId":"u_avinash","receiverId":"u_sandeep"}
+              ]
+            }
+        """.trimIndent()
+
+        val signals = com.example.data.remote.BackendJsonParsers.parseCallSignalsFromBody(pollJson)
+        assertEquals(6, signals.size)
+        assertEquals("offer", signals[0].type)
+        assertEquals("c_101", signals[0].callId)
+        assertEquals("u_avinash", signals[0].senderId)
+        assertEquals("Avinash", signals[0].senderName)
+        assertTrue(signals[0].isVideo)
+        assertEquals("v=0\r\noffer", signals[0].sdp)
+
+        assertEquals("ringing", signals[1].type)
+        assertEquals("ice", signals[2].type)
+        assertEquals("0", signals[2].sdpMid)
+        assertTrue(signals[2].candidate.startsWith("candidate:1"))
+
+        assertEquals("answer", signals[3].type)
+        assertEquals("v=0\r\nanswer", signals[3].sdp)
+        assertEquals("decline", signals[4].type)
+        assertEquals("hangup", signals[5].type)
+
+        val activeJson = """
+            {"activeCall":{"callId":"c_200","status":"ringing","callerId":"u_avinash","callerName":"Avinash","receiverId":"u_sandeep","callType":"video","sdp":"v=0\r\nactive"}}
+        """.trimIndent()
+        val activeSignals = com.example.data.remote.BackendJsonParsers.parseCallSignalsFromBody(activeJson)
+        assertEquals(1, activeSignals.size)
+        assertEquals("c_200", activeSignals[0].callId)
+        assertTrue(activeSignals[0].isVideo)
+        assertEquals("v=0\r\nactive", activeSignals[0].sdp)
+    }
+
+    @Test
+    fun `parseMediaUploadUrl resolves relative uploads path, nested data, and filename`() {
+        assertEquals(
+            "https://rendar-ud3i.onrender.com/uploads/clip_123.mp4",
+            com.example.data.remote.BackendJsonParsers.parseMediaUploadUrl("""{"url":"/uploads/clip_123.mp4"}""")
+        )
+        assertEquals(
+            "https://rendar-ud3i.onrender.com/uploads/pic_99.jpg",
+            com.example.data.remote.BackendJsonParsers.parseMediaUploadUrl("""{"data":{"fileUrl":"https://rendar-ud3i.onrender.com/uploads/pic_99.jpg"}}""")
+        )
+        assertEquals(
+            "https://rendar-ud3i.onrender.com/uploads/photo_abc.jpg",
+            com.example.data.remote.BackendJsonParsers.parseMediaUploadUrl("""{"success":true,"filename":"photo_abc.jpg"}""")
+        )
+    }
+
+    @Test
+    fun `callSignalDeduplicator prevents duplicate signal processing and tracks dismissed calls`() {
+        com.example.data.repository.CallSignalDeduplicator.clear()
+        val key = com.example.data.repository.CallSignalDeduplicator.buildKey(
+            type = "offer",
+            callId = "call_777",
+            senderId = "u_avinash",
+            payload = "sdp_data"
+        )
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.markIfNew(key))
+        org.junit.Assert.assertFalse(com.example.data.repository.CallSignalDeduplicator.markIfNew(key))
+
+        org.junit.Assert.assertFalse(com.example.data.repository.CallSignalDeduplicator.isDismissed("call_777"))
+        com.example.data.repository.CallSignalDeduplicator.markDismissed("call_777")
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.isDismissed("call_777"))
+        com.example.data.repository.CallSignalDeduplicator.clear()
+    }
 }

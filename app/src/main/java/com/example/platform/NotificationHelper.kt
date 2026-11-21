@@ -174,6 +174,7 @@ object NotificationHelper {
 
         val declineIntent = Intent(context, CallNotificationReceiver::class.java).apply {
             action = CallNotificationReceiver.ACTION_DECLINE_CALL
+            putExtra(EXTRA_CALL_ID, callId)
             putExtra(EXTRA_CALLER_ID, callerId)
         }
         val declinePending = PendingIntent.getBroadcast(

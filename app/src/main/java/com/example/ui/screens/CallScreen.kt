@@ -165,7 +165,11 @@ fun CallScreen(
     }
 
     val statusText = when (callState) {
-        is CallState.OutgoingRinging -> if (callState.isVideo) "Video calling…" else "Calling…"
+        is CallState.OutgoingRinging -> when {
+            callState.isRingingOnRemote -> "Ringing…"
+            callState.isVideo -> "Video calling…"
+            else -> "Calling…"
+        }
         is CallState.IncomingRinging -> if (callState.isVideo) "Incoming Video Call" else "Incoming Voice Call"
         is CallState.Connected -> formatDuration(durationSeconds)
         is CallState.Ended -> callState.reason

@@ -35,7 +35,7 @@ class SignalingForegroundService : Service() {
                 val myId = app.sessionManager.getCurrentSession()?.userId ?: return@collect
                 when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
-                        if (!app.isUiInForeground) {
+                        if (!app.isUiInForeground && !app.chatRepository.isCallDismissed(event.callId)) {
                             val callerUser = app.database.userDao().getUser(event.callerId)
                             val resolvedCallerName = if (event.callerName.isBlank() || event.callerName == event.callerId) {
                                 callerUser?.displayName ?: event.callerId
@@ -49,6 +49,13 @@ class SignalingForegroundService : Service() {
                                 callerName = resolvedCallerName,
                                 isVideo = event.isVideo,
                                 offerSdp = event.sdp
+                            )
+                            app.signalingClient.sendCallRinging(event.callId, myId, event.callerId)
+                            app.chatRepository.sendCallSignal(
+                                type = "ringing",
+                                callId = event.callId,
+                                receiverId = event.callerId,
+                                isVideo = event.isVideo
                             )
                         }
                     }

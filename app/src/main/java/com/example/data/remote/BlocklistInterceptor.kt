@@ -13,7 +13,8 @@ import java.io.IOException
  * 2. Intercepts HTTP 403 responses globally and triggers the administrator block alert.
  */
 class SecurityAuthInterceptor(
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    private val addJsonAcceptHeader: Boolean = true
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -22,7 +23,10 @@ class SecurityAuthInterceptor(
 
         val requestBuilder = chain.request().newBuilder()
             .header("X-Device-Lock", deviceLock)
-            .header("Accept", "application/json")
+
+        if (addJsonAcceptHeader) {
+            requestBuilder.header("Accept", "application/json")
+        }
 
         if (session != null) {
             requestBuilder

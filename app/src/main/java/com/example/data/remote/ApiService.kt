@@ -89,7 +89,16 @@ interface ApiService {
         @Part file: MultipartBody.Part,
         @Part("type") type: RequestBody,
         @Part("senderId") senderId: RequestBody
-    ): Response<MediaUploadResponse>
+    ): Response<ResponseBody>
+
+    @POST("api/calls/signal")
+    suspend fun sendCallSignal(@Body request: CallSignalRequest): Response<ResponseBody>
+
+    @GET("api/calls/poll")
+    suspend fun pollCallSignals(@Query("userId") userId: String): Response<ResponseBody>
+
+    @GET("api/calls/active")
+    suspend fun getActiveCalls(@Query("userId") userId: String): Response<ResponseBody>
 
     @GET("api/webrtc/ice-servers")
     suspend fun getIceServers(): Response<IceServersResponse>

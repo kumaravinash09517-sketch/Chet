@@ -3,6 +3,7 @@ package com.example.data.repository
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import com.example.core.security.GlobalSecurityEventBus
 import com.example.core.security.IncomingMessageAlert
 import com.example.core.security.ServerStatus
@@ -17,9 +18,11 @@ import com.example.data.local.UserEntity
 import com.example.data.remote.AdminWebhookEventRequest
 import com.example.data.remote.ApiService
 import com.example.data.remote.BackendJsonParsers
+import com.example.data.remote.CallSignalRequest
 import com.example.data.remote.DirectLoginRequest
 import com.example.data.remote.IceServerDto
 import com.example.data.remote.RegisterUserRequest
+import com.example.data.remote.RemoteCallSignalDto
 import com.example.data.remote.RemoteMessageDto
 import com.example.data.remote.RemoteUserDto
 import com.example.data.remote.SendMessageRequest
@@ -31,8 +34,12 @@ import com.example.data.remote.VerifyOtpRequest
 import com.example.data.remote.VerifyOtpResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -40,6 +47,7 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -231,6 +239,58 @@ object PhoneAuthUtils {
     }
 }
 
+object CallSignalDeduplicator {
+    private const val MAX_KEYS = 400
+    private val seenKeys = LinkedHashSet<String>()
+    private val dismissedCallIds = LinkedHashSet<String>()
+
+    fun buildKey(
+        type: String,
+        callId: String,
+        senderId: String,
+        payload: String = "",
+        signalId: String? = null
+    ): String {
+        val cleanId = signalId?.trim()?.takeIf { it.isNotBlank() }
+        if (cleanId != null) return "id:$cleanId"
+        return "${type.lowercase()}|$callId|${senderId.lowercase()}|${payload.hashCode()}"
+    }
+
+    @Synchronized
+    fun markIfNew(key: String): Boolean {
+        if (seenKeys.contains(key)) return false
+        seenKeys.add(key)
+        while (seenKeys.size > MAX_KEYS) {
+            val first = seenKeys.firstOrNull() ?: break
+            seenKeys.remove(first)
+        }
+        return true
+    }
+
+    @Synchronized
+    fun markDismissed(callId: String) {
+        val clean = callId.trim()
+        if (clean.isEmpty()) return
+        dismissedCallIds.add(clean)
+        while (dismissedCallIds.size > 100) {
+            val first = dismissedCallIds.firstOrNull() ?: break
+            dismissedCallIds.remove(first)
+        }
+    }
+
+    @Synchronized
+    fun isDismissed(callId: String): Boolean {
+        val clean = callId.trim()
+        return clean.isNotEmpty() && dismissedCallIds.contains(clean)
+    }
+
+    @Synchronized
+    fun clear() {
+        seenKeys.clear()
+        dismissedCallIds.clear()
+    }
+}
+
 class ChatRepository(
     private val context: Context,
     private val database: AppDatabase,
@@ -243,6 +303,11 @@ class ChatRepository(
     private val conversationDao = database.conversationDao()
     private val messageDao = database.messageDao()
 
+    private var callPollingJob: Job? = null
+
+    @Volatile
+    private var fastCallPolling: Boolean = false
+
     val sessionFlow: Flow<UserSession?> = sessionManager.sessionFlow
     val conversationsFlow: Flow<List<ConversationEntity>> = conversationDao.observeConversations()
     val usersFlow: Flow<List<UserEntity>> = userDao.observeAllUsers()
@@ -250,10 +315,176 @@ class ChatRepository(
 
     init {
         observeSignalingEvents()
+        observeSessionForCallPolling()
     }
 
     fun observeMessages(peerId: String): Flow<List<MessageEntity>> =
         messageDao.observeMessages(peerId)
+
+    fun setFastCallPolling(active: Boolean) {
+        fastCallPolling = active
+    }
+
+    fun markCallDismissed(callId: String) {
+        CallSignalDeduplicator.markDismissed(callId)
+    }
+
+    fun isCallDismissed(callId: String): Boolean = CallSignalDeduplicator.isDismissed(callId)
+
+    private fun observeSessionForCallPolling() {
+        scope.launch {
+            sessionFlow
+                .distinctUntilChangedBy { it?.userId }
+                .collect { session ->
+                    callPollingJob?.cancel()
+                    if (session != null) {
+                        startCallPollingLoop()
+                    }
+                }
+        }
+    }
+
+    private fun startCallPollingLoop() {
+        callPollingJob?.cancel()
+        callPollingJob = scope.launch {
+            var includeActive = true
+            while (isActive) {
+                pollIncomingCallsOnce(includeActiveCalls = includeActive)
+                includeActive = false
+                delay(if (fastCallPolling) 850L else 2_000L)
+            }
+        }
+    }
+
+    suspend fun pollIncomingCallsOnce(includeActiveCalls: Boolean = false) = withContext(Dispatchers.IO) {
+        val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
+        val collected = mutableListOf<RemoteCallSignalDto>()
+
+        runCatching {
+            val pollResp = apiService.pollCallSignals(myId)
+            if (pollResp.isSuccessful) {
+                collected.addAll(BackendJsonParsers.parseCallSignalsFromBody(pollResp.body()?.string()))
+            }
+        }
+
+        if (includeActiveCalls) {
+            runCatching {
+                val activeResp = apiService.getActiveCalls(myId)
+                if (activeResp.isSuccessful) {
+                    collected.addAll(BackendJsonParsers.parseCallSignalsFromBody(activeResp.body()?.string()))
+                }
+            }
+        }
+
+        for (signal in collected) {
+            if (signal.senderId.equals(myId, ignoreCase = true)) continue
+            if (signal.receiverId.isNotBlank() && !signal.receiverId.equals(myId, ignoreCase = true)) continue
+            if (signal.type == "offer" && CallSignalDeduplicator.isDismissed(signal.callId)) continue
+
+            val payloadHint = when (signal.type) {
+                "offer", "answer" -> signal.sdp
+                "ice" -> "${signal.candidate}|${signal.sdpMid}|${signal.sdpMLineIndex}"
+                else -> ""
+            }
+            val key = CallSignalDeduplicator.buildKey(
+                type = signal.type,
+                callId = signal.callId,
+                senderId = signal.senderId,
+                payload = payloadHint,
+                signalId = signal.signalId
+            )
+            if (!CallSignalDeduplicator.markIfNew(key)) continue
+
+            when (signal.type) {
+                "offer" -> {
+                    if (signal.sdp.isNotBlank()) {
+                        signalingClient.emitExternalEvent(
+                            SignalingEvent.IncomingCallOffer(
+                                callId = signal.callId,
+                                callerId = signal.senderId,
+                                callerName = signal.senderName,
+                                isVideo = signal.isVideo,
+                                sdp = signal.sdp
+                            )
+                        )
+                    }
+                }
+                "ringing" -> {
+                    signalingClient.emitExternalEvent(
+                        SignalingEvent.CallRinging(
+                            callId = signal.callId,
+                            peerId = signal.senderId
+                        )
+                    )
+                }
+                "answer" -> {
+                    if (signal.sdp.isNotBlank()) {
+                        signalingClient.emitExternalEvent(
+                            SignalingEvent.CallAnswerReceived(
+                                callerId = signal.senderId,
+                                sdp = signal.sdp,
+                                callId = signal.callId
+                            )
+                        )
+                    }
+                }
+                "ice" -> {
+                    if (signal.candidate.isNotBlank()) {
+                        signalingClient.emitExternalEvent(
+                            SignalingEvent.IceCandidateReceived(
+                                senderId = signal.senderId,
+                                sdpMid = signal.sdpMid,
+                                sdpMLineIndex = signal.sdpMLineIndex,
+                                candidate = signal.candidate,
+                                callId = signal.callId
+                            )
+                        )
+                    }
+                }
+                "hangup", "decline" -> {
+                    CallSignalDeduplicator.markDismissed(signal.callId)
+                    signalingClient.emitExternalEvent(
+                        SignalingEvent.CallEnded(
+                            peerId = signal.senderId,
+                            reason = signal.type,
+                            callId = signal.callId
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun sendCallSignal(
+        type: String,
+        callId: String,
+        receiverId: String,
+        isVideo: Boolean? = null,
+        sdp: String? = null,
+        candidate: String? = null,
+        sdpMid: String? = null,
+        sdpMLineIndex: Int? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        val session = sessionManager.getCurrentSession() ?: return@withContext false
+        if (receiverId.isBlank() || callId.isBlank()) return@withContext false
+        return@withContext runCatching {
+            val response = apiService.sendCallSignal(
+                CallSignalRequest(
+                    type = type,
+                    callId = callId,
+                    senderId = session.userId,
+                    senderName = session.displayName,
+                    receiverId = receiverId,
+                    isVideo = isVideo,
+                    sdp = sdp,
+                    candidate = candidate,
+                    sdpMid = sdpMid,
+                    sdpMLineIndex = sdpMLineIndex
+                )
+            )
+            response.isSuccessful
+        }.getOrDefault(false)
+    }
 
     private fun observeSignalingEvents() {
         scope.launch {
@@ -263,6 +494,7 @@ class ChatRepository(
                     is SignalingEvent.SocketConnected -> {
                         syncUserDirectory()
                         retryPendingMessages()
+                        pollIncomingCallsOnce(includeActiveCalls = true)
                     }
                     is SignalingEvent.DirectoryUpdated -> {
                         syncUserDirectory()
@@ -306,7 +538,40 @@ class ChatRepository(
                             active = event.active
                         )
                     }
-                    else -> Unit
+                    is SignalingEvent.IncomingCallOffer -> {
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey("offer", event.callId, event.callerId, event.sdp)
+                        )
+                    }
+                    is SignalingEvent.CallRinging -> {
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey("ringing", event.callId, event.peerId)
+                        )
+                    }
+                    is SignalingEvent.CallAnswerReceived -> {
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey("answer", event.callId, event.callerId, event.sdp)
+                        )
+                    }
+                    is SignalingEvent.IceCandidateReceived -> {
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey(
+                                "ice",
+                                event.callId,
+                                event.senderId,
+                                "${event.candidate}|${event.sdpMid}|${event.sdpMLineIndex}"
+                            )
+                        )
+                    }
+                    is SignalingEvent.CallEnded -> {
+                        val normType = BackendJsonParsers.normalizeCallSignalType(event.reason) ?: "hangup"
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey(normType, event.callId, event.peerId)
+                        )
+                        if (event.callId.isNotBlank()) {
+                            CallSignalDeduplicator.markDismissed(event.callId)
+                        }
+                    }
                 }
             }
         }
@@ -496,28 +761,26 @@ class ChatRepository(
         withContext(Dispatchers.IO) {
             return@withContext try {
                 val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
-                val (fileName, _) = queryUriMetadata(uri)
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                val (rawName, _) = queryUriMetadata(uri)
+                val safeName = ensureFileNameWithExtension(
+                    rawName = rawName,
+                    mimeType = mimeType,
+                    fallbackPrefix = "avatar_${System.currentTimeMillis()}",
+                    defaultExt = "jpg"
+                )
+                val bytes = readBytesFromUri(uri)
                     ?: return@withContext Result.failure(IllegalStateException("Unable to read selected image."))
-                val filePart = MultipartBody.Part.createFormData(
-                    "file",
-                    fileName ?: "avatar_${System.currentTimeMillis()}.jpg",
-                    bytes.toRequestBody(mimeType.toMediaTypeOrNull())
+                val url = uploadMediaBytesToBackend(
+                    bytes = bytes,
+                    fileName = safeName,
+                    mimeType = mimeType,
+                    mediaType = "AVATAR",
+                    senderId = senderHint
                 )
-                val resp = apiService.uploadMedia(
-                    file = filePart,
-                    type = "AVATAR".toRequestBody("text/plain".toMediaTypeOrNull()),
-                    senderId = senderHint.toRequestBody("text/plain".toMediaTypeOrNull())
-                )
-                if (resp.isSuccessful) {
-                    val url = resp.body()?.resolvedUrl()
-                    if (!url.isNullOrBlank()) {
-                        Result.success(url)
-                    } else {
-                        Result.success(uri.toString())
-                    }
+                if (!url.isNullOrBlank()) {
+                    Result.success(url)
                 } else {
-                    Result.failure(IllegalStateException("Photo upload failed (${resp.code()})"))
+                    Result.failure(IllegalStateException("Photo upload failed"))
                 }
             } catch (e: Exception) {
                 Result.failure(e)
@@ -1037,9 +1300,23 @@ class ChatRepository(
                 android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         }
-        val (fileName, fileSize) = queryUriMetadata(uri)
-        val messageId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        val mimeType = context.contentResolver.getType(uri) ?: defaultMimeTypeFor(type)
+        val (rawName, rawSize) = queryUriMetadata(uri)
+        val safeFileName = ensureFileNameWithExtension(
+            rawName = rawName,
+            mimeType = mimeType,
+            fallbackPrefix = "${type.name.lowercase(Locale.ROOT)}_$now",
+            defaultExt = defaultExtensionFor(type)
+        )
+        val bytes = readBytesFromUri(uri)
+        val cachedUriString = if (bytes != null) {
+            cacheMediaFileLocally(bytes, safeFileName)?.let { Uri.fromFile(it).toString() } ?: uri.toString()
+        } else {
+            uri.toString()
+        }
+        val effectiveSize = rawSize ?: bytes?.size?.toLong()
+        val messageId = UUID.randomUUID().toString()
         val cleanContent = caption.trim()
 
         val pendingEntity = MessageEntity(
@@ -1049,40 +1326,31 @@ class ChatRepository(
             receiverId = peerId,
             content = cleanContent,
             type = type,
-            localUri = uri.toString(),
-            fileName = fileName,
-            fileSizeBytes = fileSize,
+            localUri = cachedUriString,
+            fileName = safeFileName,
+            fileSizeBytes = effectiveSize,
             status = MessageStatus.PENDING,
             timestamp = now
         )
         persistOutgoingLocally(peerId, peerName, pendingEntity)
 
-        var uploadedUrl: String? = null
-        try {
-            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes != null) {
-                val filePart = MultipartBody.Part.createFormData(
-                    "file",
-                    fileName ?: "media_${now}",
-                    bytes.toRequestBody(mimeType.toMediaTypeOrNull())
-                )
-                val uploadResp = apiService.uploadMedia(
-                    file = filePart,
-                    type = type.name.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    senderId = myId.toRequestBody("text/plain".toMediaTypeOrNull())
-                )
-                if (uploadResp.isSuccessful) {
-                    uploadedUrl = uploadResp.body()?.resolvedUrl()
-                }
-            }
-        } catch (_: Exception) {
-            // Retain localUri if upload fails
+        val uploadedUrl = if (bytes != null) {
+            uploadMediaBytesToBackend(
+                bytes = bytes,
+                fileName = safeFileName,
+                mimeType = mimeType,
+                mediaType = type.name,
+                senderId = myId
+            )
+        } else {
+            null
         }
 
-        val updatedEntity = pendingEntity.copy(mediaUrl = uploadedUrl)
-        messageDao.upsertMessage(updatedEntity)
-        dispatchOutgoingMessage(updatedEntity, peerName)
+        if (!uploadedUrl.isNullOrBlank()) {
+            val updatedEntity = pendingEntity.copy(mediaUrl = uploadedUrl)
+            messageDao.upsertMessage(updatedEntity)
+            dispatchOutgoingMessage(updatedEntity, peerName)
+        }
     }
 
     suspend fun sendLocationMessage(
@@ -1254,12 +1522,43 @@ class ChatRepository(
     }
 
     suspend fun retryPendingMessages(onlyConversationId: String? = null) = withContext(Dispatchers.IO) {
+        val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
         val pending = messageDao.getPendingMessages()
             .filter { onlyConversationId == null || it.conversationId == onlyConversationId }
-        for (msg in pending) {
-            val peerName = conversationDao.getConversation(msg.conversationId)?.peerName
-                ?: userDao.getUser(msg.conversationId)?.displayName
-                ?: msg.conversationId
+        for (rawMsg in pending) {
+            val peerName = conversationDao.getConversation(rawMsg.conversationId)?.peerName
+                ?: userDao.getUser(rawMsg.conversationId)?.displayName
+                ?: rawMsg.conversationId
+
+            var msg = rawMsg
+            val needsUpload = msg.type in setOf(
+                MessageType.IMAGE,
+                MessageType.VIDEO,
+                MessageType.AUDIO,
+                MessageType.DOCUMENT
+            ) && msg.mediaUrl.isNullOrBlank()
+
+            if (needsUpload) {
+                val localUri = msg.localUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: continue
+                val bytes = readBytesFromUri(localUri) ?: continue
+                val mimeType = context.contentResolver.getType(localUri) ?: defaultMimeTypeFor(msg.type)
+                val safeName = ensureFileNameWithExtension(
+                    rawName = msg.fileName,
+                    mimeType = mimeType,
+                    fallbackPrefix = "${msg.type.name.lowercase(Locale.ROOT)}_${msg.timestamp}",
+                    defaultExt = defaultExtensionFor(msg.type)
+                )
+                val uploadedUrl = uploadMediaBytesToBackend(
+                    bytes = bytes,
+                    fileName = safeName,
+                    mimeType = mimeType,
+                    mediaType = msg.type.name,
+                    senderId = myId
+                ) ?: continue
+                msg = msg.copy(mediaUrl = uploadedUrl, fileName = safeName)
+                messageDao.upsertMessage(msg)
+            }
+
             dispatchOutgoingMessage(msg, peerName)
         }
     }
@@ -1486,15 +1785,94 @@ class ChatRepository(
         }
     }
 
+    private suspend fun uploadMediaBytesToBackend(
+        bytes: ByteArray,
+        fileName: String,
+        mimeType: String,
+        mediaType: String,
+        senderId: String
+    ): String? {
+        return runCatching {
+            val filePart = MultipartBody.Part.createFormData(
+                "file",
+                fileName,
+                bytes.toRequestBody(mimeType.toMediaTypeOrNull())
+            )
+            val uploadResp = apiService.uploadMedia(
+                file = filePart,
+                type = mediaType.toRequestBody("text/plain".toMediaTypeOrNull()),
+                senderId = senderId.toRequestBody("text/plain".toMediaTypeOrNull())
+            )
+            if (uploadResp.isSuccessful) {
+                BackendJsonParsers.parseMediaUploadUrl(uploadResp.body()?.string())
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun readBytesFromUri(uri: Uri): ByteArray? {
+        return runCatching {
+            if (uri.scheme == "file" && uri.path != null) {
+                val file = File(uri.path!!)
+                if (file.exists()) return@runCatching file.readBytes()
+            }
+            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull()
+    }
+
+    private fun cacheMediaFileLocally(bytes: ByteArray, fileName: String): File? {
+        return runCatching {
+            val dir = File(context.filesDir, "media_cache").apply { mkdirs() }
+            val safeBase = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val dest = File(dir, "${UUID.randomUUID()}_$safeBase")
+            dest.writeBytes(bytes)
+            dest
+        }.getOrNull()
+    }
+
+    private fun ensureFileNameWithExtension(
+        rawName: String?,
+        mimeType: String,
+        fallbackPrefix: String,
+        defaultExt: String
+    ): String {
+        val clean = rawName?.trim()?.takeIf { it.isNotBlank() }
+        val mimeExt = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)?.lowercase(Locale.ROOT)
+        val ext = mimeExt?.takeIf { it.isNotBlank() } ?: defaultExt
+        if (clean == null) return "$fallbackPrefix.$ext"
+        return if (clean.contains('.') && clean.substringAfterLast('.').length in 2..5) {
+            clean
+        } else {
+            "$clean.$ext"
+        }
+    }
+
+    private fun defaultMimeTypeFor(type: MessageType): String = when (type) {
+        MessageType.IMAGE -> "image/jpeg"
+        MessageType.VIDEO -> "video/mp4"
+        MessageType.AUDIO -> "audio/mp4"
+        else -> "application/octet-stream"
+    }
+
+    private fun defaultExtensionFor(type: MessageType): String = when (type) {
+        MessageType.IMAGE -> "jpg"
+        MessageType.VIDEO -> "mp4"
+        MessageType.AUDIO -> "m4a"
+        else -> "bin"
+    }
+
     private fun queryUriMetadata(uri: Uri): Pair<String?, Long?> {
         var name: String? = null
         var size: Long? = null
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (cursor.moveToFirst()) {
-                if (nameIdx >= 0) name = cursor.getString(nameIdx)
-                if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+        runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (cursor.moveToFirst()) {
+                    if (nameIdx >= 0) name = cursor.getString(nameIdx)
+                    if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+                }
             }
         }
         return name to size

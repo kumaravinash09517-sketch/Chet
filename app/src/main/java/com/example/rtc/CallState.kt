@@ -5,7 +5,8 @@ sealed interface CallState {
     data class OutgoingRinging(
         val peerId: String,
         val peerName: String,
-        val isVideo: Boolean
+        val isVideo: Boolean,
+        val isRingingOnRemote: Boolean = false
     ) : CallState
 
     data class IncomingRinging(

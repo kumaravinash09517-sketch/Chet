@@ -3,6 +3,8 @@ package com.example
 import android.app.Application
 import android.content.Intent
 import android.os.Build
+import coil.ImageLoader
+import coil.ImageLoaderFactory
 import com.example.core.security.SessionManager
 import com.example.data.local.AppDatabase
 import com.example.data.remote.NetworkModule
@@ -13,7 +15,7 @@ import com.example.platform.LocationHelper
 import com.example.platform.NotificationHelper
 import com.example.platform.SignalingForegroundService
 
-class HelloSirApplication : Application() {
+class HelloSirApplication : Application(), ImageLoaderFactory {
 
     lateinit var sessionManager: SessionManager
         private set
@@ -55,6 +57,13 @@ class HelloSirApplication : Application() {
         )
         contactSyncHelper = ContactSyncHelper(this)
         locationHelper = LocationHelper(this)
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .okHttpClient { NetworkModule.provideImageOkHttpClient(sessionManager) }
+            .crossfade(true)
+            .build()
     }
 
     fun startBackgroundSignalingService() {

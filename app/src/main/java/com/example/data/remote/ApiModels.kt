@@ -469,6 +469,49 @@ data class BasicSuccessResponse(
     @Json(name = "message") val message: String? = null
 )
 
+@JsonClass(generateAdapter = true)
+data class CallSignalRequest(
+    @Json(name = "type") val type: String,
+    @Json(name = "callId") val callId: String,
+    @Json(name = "call_id") val callIdSnake: String = callId,
+    @Json(name = "senderId") val senderId: String,
+    @Json(name = "sender_id") val senderIdSnake: String = senderId,
+    @Json(name = "callerId") val callerId: String = senderId,
+    @Json(name = "caller_id") val callerIdSnake: String = senderId,
+    @Json(name = "senderName") val senderName: String? = null,
+    @Json(name = "sender_name") val senderNameSnake: String? = senderName,
+    @Json(name = "callerName") val callerName: String? = senderName,
+    @Json(name = "caller_name") val callerNameSnake: String? = senderName,
+    @Json(name = "receiverId") val receiverId: String,
+    @Json(name = "receiver_id") val receiverIdSnake: String = receiverId,
+    @Json(name = "toUserId") val toUserId: String = receiverId,
+    @Json(name = "to") val to: String = receiverId,
+    @Json(name = "isVideo") val isVideo: Boolean? = null,
+    @Json(name = "is_video") val isVideoSnake: Boolean? = isVideo,
+    @Json(name = "sdp") val sdp: String? = null,
+    @Json(name = "candidate") val candidate: String? = null,
+    @Json(name = "sdpMid") val sdpMid: String? = null,
+    @Json(name = "sdp_mid") val sdpMidSnake: String? = sdpMid,
+    @Json(name = "sdpMLineIndex") val sdpMLineIndex: Int? = null,
+    @Json(name = "sdp_m_line_index") val sdpMLineIndexSnake: Int? = sdpMLineIndex,
+    @Json(name = "timestamp") val timestamp: Long = System.currentTimeMillis()
+)
+
+data class RemoteCallSignalDto(
+    val signalId: String? = null,
+    val type: String,
+    val callId: String,
+    val senderId: String,
+    val senderName: String,
+    val receiverId: String = "",
+    val isVideo: Boolean = false,
+    val sdp: String = "",
+    val candidate: String = "",
+    val sdpMid: String = "",
+    val sdpMLineIndex: Int = 0,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 object BackendJsonParsers {
 
     fun normalizeMediaUrl(rawUrl: String?): String? {
@@ -484,6 +527,226 @@ object BackendJsonParsers {
         }
         val base = NetworkModule.BASE_URL.trimEnd('/')
         return "$base/${trimmed.trimStart('/')}"
+    }
+
+    fun parseMediaUploadUrl(rawJson: String?): String? {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("/uploads/", ignoreCase = true)
+        ) {
+            return normalizeMediaUrl(trimmed)
+        }
+        if (!trimmed.startsWith("{")) return null
+        return runCatching {
+            val root = org.json.JSONObject(trimmed)
+            val candidates = listOfNotNull(
+                root,
+                root.optJSONObject("data"),
+                root.optJSONObject("file"),
+                root.optJSONObject("media"),
+                root.optJSONObject("result"),
+                root.optJSONObject("upload")
+            )
+            for (obj in candidates) {
+                val direct = firstNonBlankString(
+                    obj,
+                    "url",
+                    "mediaUrl",
+                    "media_url",
+                    "fileUrl",
+                    "file_url",
+                    "downloadUrl",
+                    "download_url",
+                    "path",
+                    "filePath",
+                    "file_path",
+                    "location"
+                )
+                if (direct != null) {
+                    return@runCatching normalizeMediaUrl(direct)
+                }
+                val fileName = firstNonBlankString(
+                    obj,
+                    "storedFilename",
+                    "stored_filename",
+                    "filename",
+                    "fileName",
+                    "file_name"
+                )
+                if (fileName != null) {
+                    val path = if (fileName.startsWith("/") || fileName.contains("uploads/")) {
+                        fileName
+                    } else {
+                        "/uploads/$fileName"
+                    }
+                    return@runCatching normalizeMediaUrl(path)
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
+    fun parseCallSignalsFromBody(rawJson: String?): List<RemoteCallSignalDto> {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return emptyList()
+        return runCatching {
+            when {
+                trimmed.startsWith("[") -> {
+                    parseCallSignalArray(org.json.JSONArray(trimmed))
+                }
+                trimmed.startsWith("{") -> {
+                    val obj = org.json.JSONObject(trimmed)
+                    val arrayKeys = listOf("signals", "events", "calls", "activeCalls", "active_calls", "data", "results", "items")
+                    val array = arrayKeys.firstNotNullOfOrNull { key -> obj.optJSONArray(key) }
+                    if (array != null) {
+                        parseCallSignalArray(array)
+                    } else {
+                        val singleObj = obj.optJSONObject("activeCall")
+                            ?: obj.optJSONObject("active_call")
+                            ?: obj.optJSONObject("call")
+                            ?: obj.optJSONObject("signal")
+                            ?: obj.optJSONObject("data")
+                            ?: obj
+                        listOfNotNull(parseSingleCallSignal(singleObj))
+                    }
+                }
+                else -> emptyList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun parseCallSignalArray(arr: org.json.JSONArray): List<RemoteCallSignalDto> {
+        val result = mutableListOf<RemoteCallSignalDto>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            parseSingleCallSignal(item)?.let { result.add(it) }
+        }
+        return result
+    }
+
+    fun parseSingleCallSignal(root: org.json.JSONObject): RemoteCallSignalDto? {
+        val data = root.optJSONObject("data") ?: root.optJSONObject("payload") ?: root
+        val rawType = firstNonBlankString(root, "type", "event", "signalType", "signal_type", "action", "status")
+            ?: firstNonBlankString(data, "type", "event", "signalType", "signal_type", "action", "status")
+            ?: return null
+
+        val normalizedType = normalizeCallSignalType(rawType) ?: return null
+
+        val senderId = firstNonBlankString(
+            data,
+            "callerId",
+            "caller_id",
+            "senderId",
+            "sender_id",
+            "from",
+            "fromUserId",
+            "from_user_id"
+        ) ?: firstNonBlankString(root, "callerId", "caller_id", "senderId", "sender_id", "from")
+            ?: return null
+
+        val senderName = firstNonBlankString(
+            data,
+            "callerName",
+            "caller_name",
+            "senderName",
+            "sender_name",
+            "fromName",
+            "from_name"
+        ) ?: firstNonBlankString(root, "callerName", "caller_name", "senderName", "sender_name")
+            ?: senderId
+
+        val receiverId = firstNonBlankString(
+            data,
+            "receiverId",
+            "receiver_id",
+            "calleeId",
+            "callee_id",
+            "toUserId",
+            "to_user_id",
+            "to"
+        ) ?: firstNonBlankString(root, "receiverId", "receiver_id", "toUserId", "to")
+            ?: ""
+
+        val callId = firstNonBlankString(data, "callId", "call_id", "sessionId", "session_id", "roomId", "room_id")
+            ?: firstNonBlankString(root, "callId", "call_id", "sessionId", "session_id")
+            ?: ""
+
+        val signalId = firstNonBlankString(data, "signalId", "signal_id", "id", "_id")
+            ?: firstNonBlankString(root, "signalId", "signal_id", "id", "_id")
+
+        val isVideo = when {
+            data.has("isVideo") && !data.isNull("isVideo") -> data.optBoolean("isVideo", false)
+            data.has("is_video") && !data.isNull("is_video") -> data.optBoolean("is_video", false)
+            root.has("isVideo") && !root.isNull("isVideo") -> root.optBoolean("isVideo", false)
+            root.has("is_video") && !root.isNull("is_video") -> root.optBoolean("is_video", false)
+            else -> {
+                val callKind = firstNonBlankString(data, "callType", "call_type", "mediaType", "media_type")
+                    ?: firstNonBlankString(root, "callType", "call_type")
+                callKind?.equals("video", ignoreCase = true) == true
+            }
+        }
+
+        val sdpObj = data.optJSONObject("offer")
+            ?: data.optJSONObject("answer")
+            ?: data.optJSONObject("sdp")
+        val sdp = firstNonBlankString(data, "sdp", "offerSdp", "offer_sdp", "answerSdp", "answer_sdp")
+            ?: sdpObj?.let { firstNonBlankString(it, "sdp", "description") }
+            ?: ""
+
+        val iceObj = data.optJSONObject("candidate")
+            ?: data.optJSONObject("ice")
+            ?: data.optJSONObject("iceCandidate")
+            ?: data.optJSONObject("ice_candidate")
+        val candidate = firstNonBlankString(data, "candidate", "iceCandidate", "ice_candidate")
+            ?: iceObj?.let { firstNonBlankString(it, "candidate", "sdp") }
+            ?: ""
+        val sdpMid = firstNonBlankString(data, "sdpMid", "sdp_mid")
+            ?: iceObj?.let { firstNonBlankString(it, "sdpMid", "sdp_mid") }
+            ?: ""
+        val sdpMLineIndex = when {
+            data.has("sdpMLineIndex") && !data.isNull("sdpMLineIndex") -> data.optInt("sdpMLineIndex", 0)
+            data.has("sdp_m_line_index") && !data.isNull("sdp_m_line_index") -> data.optInt("sdp_m_line_index", 0)
+            iceObj != null && iceObj.has("sdpMLineIndex") && !iceObj.isNull("sdpMLineIndex") -> iceObj.optInt("sdpMLineIndex", 0)
+            iceObj != null && iceObj.has("sdp_m_line_index") && !iceObj.isNull("sdp_m_line_index") -> iceObj.optInt("sdp_m_line_index", 0)
+            else -> 0
+        }
+
+        val timestamp = parseTimestampMillis(data, "timestamp", "createdAt", "created_at")
+            ?: parseTimestampMillis(root, "timestamp", "createdAt", "created_at")
+            ?: System.currentTimeMillis()
+
+        // Validate required payload fields for offer/answer/ice
+        if ((normalizedType == "offer" || normalizedType == "answer") && sdp.isBlank()) return null
+        if (normalizedType == "ice" && candidate.isBlank()) return null
+
+        return RemoteCallSignalDto(
+            signalId = signalId,
+            type = normalizedType,
+            callId = callId.ifBlank { "call_${senderId}_$timestamp" },
+            senderId = senderId,
+            senderName = senderName,
+            receiverId = receiverId,
+            isVideo = isVideo,
+            sdp = sdp,
+            candidate = candidate,
+            sdpMid = sdpMid,
+            sdpMLineIndex = sdpMLineIndex,
+            timestamp = timestamp
+        )
+    }
+
+    fun normalizeCallSignalType(rawType: String?): String? {
+        return when (rawType?.trim()?.lowercase()) {
+            "offer", "call_offer", "offering", "incoming_call" -> "offer"
+            "ringing", "call_ringing" -> "ringing"
+            "answer", "call_answer", "answered", "accept", "call_accept" -> "answer"
+            "ice", "ice_candidate", "candidate" -> "ice"
+            "hangup", "call_hangup", "end", "call_end", "ended" -> "hangup"
+            "decline", "call_decline", "reject", "call_reject", "declined", "rejected" -> "decline"
+            else -> null
+        }
     }
 
     fun parseUsersFromBody(rawJson: String?): List<RemoteUserDto> {
@@ -638,6 +901,8 @@ object BackendJsonParsers {
                 "image_url",
                 "photoUrl",
                 "photo_url",
+                "videoUrl",
+                "video_url",
                 "attachmentUrl",
                 "attachment_url",
                 "url"

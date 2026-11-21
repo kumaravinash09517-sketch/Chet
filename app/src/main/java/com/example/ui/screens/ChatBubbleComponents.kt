@@ -1,11 +1,13 @@
 package com.example.ui.screens
 
+import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Icon
@@ -41,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,7 +58,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
 import com.example.data.remote.BackendJsonParsers
@@ -63,6 +69,7 @@ import com.example.ui.theme.IncomingBubbleLight
 import com.example.ui.theme.OnlineGreen
 import com.example.ui.theme.OutgoingBubbleDark
 import com.example.ui.theme.OutgoingBubbleLight
+import java.io.File
 import java.util.Locale
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -72,6 +79,7 @@ fun ChatMessageBubble(
     isMine: Boolean,
     onLongPressDelete: (MessageEntity) -> Unit,
     onImagePreview: (String) -> Unit,
+    onVideoPreview: (String) -> Unit = {},
     onStopLiveLocation: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -92,8 +100,14 @@ fun ChatMessageBubble(
     )
 
     val resolvedMediaSource = remember(message.localUri, message.mediaUrl) {
-        message.localUri?.takeIf { it.isNotBlank() }
-            ?: BackendJsonParsers.normalizeMediaUrl(message.mediaUrl)
+        val local = message.localUri?.trim()?.takeIf { it.isNotBlank() }
+        val usableLocal = if (local != null && local.startsWith("file://")) {
+            val filePath = Uri.parse(local).path
+            if (filePath != null && File(filePath).exists()) local else null
+        } else {
+            local
+        }
+        usableLocal ?: BackendJsonParsers.normalizeMediaUrl(message.mediaUrl)
     }
     val needsWideBubble = message.type != MessageType.TEXT && message.type != MessageType.CONTACT
 
@@ -115,6 +129,8 @@ fun ChatMessageBubble(
                     onClick = {
                         if (message.type == MessageType.IMAGE && resolvedMediaSource != null) {
                             onImagePreview(resolvedMediaSource)
+                        } else if (message.type == MessageType.VIDEO && resolvedMediaSource != null) {
+                            onVideoPreview(resolvedMediaSource)
                         }
                     },
                     onLongClick = { onLongPressDelete(message) }
@@ -138,10 +154,19 @@ fun ChatMessageBubble(
                         )
                     }
                     MessageType.IMAGE -> {
+                        val context = LocalContext.current
                         var imageLoadFailed by remember(resolvedMediaSource) { mutableStateOf(false) }
+                        var retryNonce by remember(resolvedMediaSource) { mutableIntStateOf(0) }
                         if (resolvedMediaSource != null && !imageLoadFailed) {
+                            val request = remember(resolvedMediaSource, retryNonce) {
+                                ImageRequest.Builder(context)
+                                    .data(resolvedMediaSource)
+                                    .setParameter("retry", retryNonce, memoryCacheKey = null)
+                                    .crossfade(true)
+                                    .build()
+                            }
                             AsyncImage(
-                                model = resolvedMediaSource,
+                                model = request,
                                 contentDescription = message.content.ifBlank { "Shared photo" },
                                 contentScale = ContentScale.Crop,
                                 onError = { imageLoadFailed = true },
@@ -158,6 +183,10 @@ fun ChatMessageBubble(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(132.dp)
+                                    .clickable(enabled = resolvedMediaSource != null) {
+                                        retryNonce++
+                                        imageLoadFailed = false
+                                    }
                             ) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
@@ -165,14 +194,18 @@ fun ChatMessageBubble(
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Icon(
-                                        imageVector = if (imageLoadFailed) Icons.Rounded.BrokenImage else Icons.Rounded.Image,
+                                        imageVector = if (imageLoadFailed) Icons.Rounded.Refresh else Icons.Rounded.Image,
                                         contentDescription = "Photo attachment",
                                         tint = contentColor,
                                         modifier = Modifier.size(32.dp)
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        text = message.fileName ?: if (imageLoadFailed) "Photo unavailable" else "Photo",
+                                        text = when {
+                                            imageLoadFailed -> "Tap to retry photo"
+                                            resolvedMediaSource == null -> "Uploading photo…"
+                                            else -> message.fileName ?: "Photo"
+                                        },
                                         style = MaterialTheme.typography.labelMedium,
                                         color = contentColor,
                                         maxLines = 1,
@@ -191,14 +224,14 @@ fun ChatMessageBubble(
                         }
                     }
                     MessageType.VIDEO -> {
-                        MediaActionCard(
-                            icon = Icons.Rounded.Videocam,
+                        VideoPreviewCard(
                             title = message.fileName ?: "Video Clip",
                             subtitle = formatBytes(message.fileSizeBytes),
                             sourceUri = resolvedMediaSource,
-                            mimeType = "video/*",
+                            caption = message.content,
                             contentColor = contentColor,
-                            mutedColor = mutedColor
+                            mutedColor = mutedColor,
+                            onPlay = { src -> onVideoPreview(src) }
                         )
                     }
                     MessageType.AUDIO -> {
@@ -279,6 +312,75 @@ fun ChatMessageBubble(
 }
 
 @Composable
+private fun VideoPreviewCard(
+    title: String,
+    subtitle: String,
+    sourceUri: String?,
+    caption: String,
+    contentColor: Color,
+    mutedColor: Color,
+    onPlay: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.28f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(140.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(enabled = sourceUri != null) {
+                    if (sourceUri != null) onPlay(sourceUri)
+                }
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.White.copy(alpha = 0.22f),
+                        modifier = Modifier.size(52.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (sourceUri != null) Icons.Rounded.PlayArrow else Icons.Rounded.Videocam,
+                                contentDescription = "Play video",
+                                tint = contentColor,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = contentColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (sourceUri != null) "Tap to play • $subtitle" else "Uploading video…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = mutedColor
+                    )
+                }
+            }
+        }
+        if (caption.isNotBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodyMedium,
+                color = contentColor
+            )
+        }
+    }
+}
+
+@Composable
 private fun MediaActionCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
@@ -324,8 +426,9 @@ private fun MediaActionCard(
                 TextButton(
                     onClick = {
                         runCatching {
+                            val launchUri = resolveExternalShareableUri(context, sourceUri)
                             val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(Uri.parse(sourceUri), mimeType)
+                                setDataAndType(launchUri, mimeType)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(intent)
@@ -337,6 +440,19 @@ private fun MediaActionCard(
             }
         }
     }
+}
+
+internal fun resolveExternalShareableUri(context: Context, sourceUri: String): Uri {
+    val parsed = Uri.parse(sourceUri)
+    if (parsed.scheme == "file" && parsed.path != null) {
+        val file = File(parsed.path!!)
+        if (file.exists()) {
+            return runCatching {
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            }.getOrDefault(parsed)
+        }
+    }
+    return parsed
 }
 
 @Composable

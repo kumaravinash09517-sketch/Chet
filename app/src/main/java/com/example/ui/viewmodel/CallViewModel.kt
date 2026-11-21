@@ -57,6 +57,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     val callDurationSeconds: StateFlow<Long> = _callDurationSeconds.asStateFlow()
 
     private var webRTCClient: WebRTCClient? = null
+    private var activeCallId: String = ""
     private var activePeerId: String = ""
     private var activePeerName: String = ""
     private var activeIsVideo: Boolean = false
@@ -101,31 +102,58 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             signalingClient.events.collect { event ->
                 when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
-                        if (_callState.value is CallState.Idle || _callState.value is CallState.Ended) {
+                        val effectiveCallId = event.callId.ifBlank { UUID.randomUUID().toString() }
+                        val alreadyHandled = repository.isCallDismissed(effectiveCallId)
+                        if (!alreadyHandled && (_callState.value is CallState.Idle || _callState.value is CallState.Ended)) {
                             val resolvedCallerName = if (event.callerName.isBlank() || event.callerName == event.callerId) {
                                 app.database.userDao().getUser(event.callerId)?.displayName ?: event.callerId
                             } else {
                                 event.callerName
                             }
+                            activeCallId = effectiveCallId
                             activePeerId = event.callerId
                             activePeerName = resolvedCallerName
                             activeIsVideo = event.isVideo
                             _isVideoEnabled.value = event.isVideo
                             _hasRemoteVideo.value = false
                             pendingRemoteIce.clear()
+                            repository.setFastCallPolling(true)
                             NotificationHelper.startRingtoneAndVibrate(app)
                             _callState.value = CallState.IncomingRinging(
-                                callId = event.callId,
+                                callId = effectiveCallId,
                                 callerId = event.callerId,
                                 callerName = resolvedCallerName,
                                 isVideo = event.isVideo,
                                 offerSdp = event.sdp
                             )
+                            val myId = app.sessionManager.getCurrentSession()?.userId
+                            if (myId != null) {
+                                signalingClient.sendCallRinging(effectiveCallId, myId, event.callerId)
+                                launch {
+                                    repository.sendCallSignal(
+                                        type = "ringing",
+                                        callId = effectiveCallId,
+                                        receiverId = event.callerId,
+                                        isVideo = event.isVideo
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    is SignalingEvent.CallRinging -> {
+                        val current = _callState.value
+                        val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
+                        if (current is CallState.OutgoingRinging && matchesCall && !current.isRingingOnRemote) {
+                            _callState.value = current.copy(isRingingOnRemote = true)
                         }
                     }
                     is SignalingEvent.CallAnswerReceived -> {
                         val current = _callState.value
-                        if (current is CallState.OutgoingRinging && event.callerId.equals(current.peerId, ignoreCase = true)) {
+                        val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
+                        if (current is CallState.OutgoingRinging &&
+                            matchesCall &&
+                            event.callerId.equals(current.peerId, ignoreCase = true)
+                        ) {
                             NotificationHelper.stopOutgoingRingback()
                             webRTCClient?.handleRemoteAnswer(event.sdp)
                             drainPendingIce()
@@ -134,6 +162,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     is SignalingEvent.IceCandidateReceived -> {
+                        val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
+                        if (!matchesCall) return@collect
                         val candidate = IceCandidate(
                             event.sdpMid,
                             event.sdpMLineIndex,
@@ -150,8 +180,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     is SignalingEvent.CallEnded -> {
-                        if (event.peerId.equals(activePeerId, ignoreCase = true) || activePeerId.isNotBlank()) {
-                            endCallLocally(sendSignal = false, reason = "Call ended")
+                        val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
+                        val matchesPeer = event.peerId.isBlank() || event.peerId.equals(activePeerId, ignoreCase = true)
+                        if (matchesCall && matchesPeer && _callState.value !is CallState.Idle) {
+                            val label = if (event.reason.contains("decline", ignoreCase = true) ||
+                                event.reason.contains("reject", ignoreCase = true)
+                            ) {
+                                "Call declined"
+                            } else {
+                                "Call ended"
+                            }
+                            endCallLocally(sendSignal = false, reason = label)
                         }
                     }
                     else -> Unit
@@ -163,6 +202,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     fun startOutgoingCall(peerId: String, peerName: String, isVideo: Boolean) {
         viewModelScope.launch {
             app.sessionManager.getCurrentSession() ?: return@launch
+            activeCallId = UUID.randomUUID().toString()
             activePeerId = peerId
             activePeerName = peerName
             activeIsVideo = isVideo
@@ -172,6 +212,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             _isFrontCamera.value = true
             _hasRemoteVideo.value = false
             pendingRemoteIce.clear()
+            repository.setFastCallPolling(true)
 
             _callState.value = CallState.OutgoingRinging(peerId, peerName, isVideo)
             NotificationHelper.startOutgoingRingback()
@@ -196,6 +237,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         NotificationHelper.stopRingtoneAndVibrate(app)
 
         viewModelScope.launch {
+            activeCallId = incoming.callId.ifBlank { activeCallId.ifBlank { UUID.randomUUID().toString() } }
             activePeerId = incoming.callerId
             activePeerName = incoming.callerName
             activeIsVideo = incoming.isVideo
@@ -204,6 +246,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             _isVideoEnabled.value = incoming.isVideo
             _isFrontCamera.value = true
             _hasRemoteVideo.value = false
+            repository.setFastCallPolling(true)
 
             // Transition immediately and open camera preview right away
             transitionToConnected(incoming.callerId, incoming.callerName, incoming.isVideo)
@@ -242,13 +285,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         isVideo: Boolean,
         offerSdp: String
     ) {
+        activeCallId = callId.ifBlank { UUID.randomUUID().toString() }
         activePeerId = callerId
         activePeerName = callerName
         activeIsVideo = isVideo
         _isVideoEnabled.value = isVideo
         _hasRemoteVideo.value = false
+        repository.setFastCallPolling(true)
         _callState.value = CallState.IncomingRinging(
-            callId = callId,
+            callId = activeCallId,
             callerId = callerId,
             callerName = callerName,
             isVideo = isVideo,
@@ -260,10 +305,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         val incoming = _callState.value as? CallState.IncomingRinging
         NotificationHelper.stopRingtoneAndVibrate(app)
         val peerId = incoming?.callerId ?: activePeerId
+        val callIdToDecline = incoming?.callId?.ifBlank { activeCallId } ?: activeCallId
+        if (callIdToDecline.isNotBlank()) {
+            repository.markCallDismissed(callIdToDecline)
+        }
         viewModelScope.launch {
             val myId = app.sessionManager.getCurrentSession()?.userId
             if (myId != null && peerId.isNotBlank()) {
-                signalingClient.sendCallEnd(myId, peerId, isReject = true)
+                signalingClient.sendCallEnd(myId, peerId, isReject = true, callId = callIdToDecline)
+                repository.sendCallSignal(
+                    type = "decline",
+                    callId = callIdToDecline.ifBlank { "decline_${System.currentTimeMillis()}" },
+                    receiverId = peerId
+                )
             }
         }
         endCallLocally(sendSignal = false, reason = "Declined")
@@ -280,11 +334,23 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _callDurationSeconds.value = 0L
         _hasRemoteVideo.value = false
         _isFrontCamera.value = true
+        repository.setFastCallPolling(false)
 
-        if (sendSignal && activePeerId.isNotBlank()) {
+        val peerToNotify = activePeerId
+        val callIdToNotify = activeCallId
+        if (callIdToNotify.isNotBlank()) {
+            repository.markCallDismissed(callIdToNotify)
+        }
+
+        if (sendSignal && peerToNotify.isNotBlank()) {
             viewModelScope.launch {
                 val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
-                signalingClient.sendCallEnd(myId, activePeerId, isReject = false)
+                signalingClient.sendCallEnd(myId, peerToNotify, isReject = false, callId = callIdToNotify)
+                repository.sendCallSignal(
+                    type = "hangup",
+                    callId = callIdToNotify.ifBlank { "hangup_${System.currentTimeMillis()}" },
+                    receiverId = peerToNotify
+                )
             }
         }
 
@@ -294,6 +360,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         attachedLocalRenderer = null
         attachedRemoteRenderer = null
         stopActiveCallForegroundService()
+        activeCallId = ""
         activePeerId = ""
         activePeerName = ""
         activeIsVideo = false
@@ -356,19 +423,41 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             onLocalSdpCreated = { sdp ->
                 viewModelScope.launch {
                     val session = app.sessionManager.getCurrentSession() ?: return@launch
+                    val callIdToSend = activeCallId.ifBlank {
+                        UUID.randomUUID().toString().also { activeCallId = it }
+                    }
+                    val targetPeerId = activePeerId
+                    val isVideoCall = activeIsVideo
+                    if (targetPeerId.isBlank()) return@launch
+
                     if (sdp.type == SessionDescription.Type.OFFER) {
                         signalingClient.sendCallOffer(
-                            callId = UUID.randomUUID().toString(),
+                            callId = callIdToSend,
                             senderId = session.userId,
                             senderName = session.displayName,
-                            receiverId = activePeerId,
-                            isVideo = activeIsVideo,
+                            receiverId = targetPeerId,
+                            isVideo = isVideoCall,
+                            sdp = sdp.description
+                        )
+                        repository.sendCallSignal(
+                            type = "offer",
+                            callId = callIdToSend,
+                            receiverId = targetPeerId,
+                            isVideo = isVideoCall,
                             sdp = sdp.description
                         )
                     } else if (sdp.type == SessionDescription.Type.ANSWER) {
                         signalingClient.sendCallAnswer(
                             senderId = session.userId,
-                            receiverId = activePeerId,
+                            receiverId = targetPeerId,
+                            sdp = sdp.description,
+                            callId = callIdToSend
+                        )
+                        repository.sendCallSignal(
+                            type = "answer",
+                            callId = callIdToSend,
+                            receiverId = targetPeerId,
+                            isVideo = isVideoCall,
                             sdp = sdp.description
                         )
                     }
@@ -377,14 +466,27 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             onIceCandidateGenerated = { candidate ->
                 viewModelScope.launch {
                     val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
-                    if (activePeerId.isNotBlank()) {
+                    val targetPeerId = activePeerId
+                    val callIdToSend = activeCallId
+                    if (targetPeerId.isNotBlank()) {
                         signalingClient.sendIceCandidate(
                             senderId = myId,
-                            receiverId = activePeerId,
+                            receiverId = targetPeerId,
                             sdpMid = candidate.sdpMid,
                             sdpMLineIndex = candidate.sdpMLineIndex,
-                            candidate = candidate.sdp
+                            candidate = candidate.sdp,
+                            callId = callIdToSend
                         )
+                        if (callIdToSend.isNotBlank()) {
+                            repository.sendCallSignal(
+                                type = "ice",
+                                callId = callIdToSend,
+                                receiverId = targetPeerId,
+                                candidate = candidate.sdp,
+                                sdpMid = candidate.sdpMid,
+                                sdpMLineIndex = candidate.sdpMLineIndex
+                            )
+                        }
                     }
                 }
             },

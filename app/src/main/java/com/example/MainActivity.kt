@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -81,6 +82,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 data class PendingChatDeepLink(
     val peerId: String,
@@ -125,7 +127,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        (application as HelloSirApplication).isUiInForeground = true
+        val app = application as HelloSirApplication
+        app.isUiInForeground = true
+        lifecycleScope.launch {
+            app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
+        }
     }
 
     override fun onPause() {

@@ -39,6 +39,16 @@ object NetworkModule {
             .build()
     }
 
+    fun provideImageOkHttpClient(sessionManager: SessionManager): OkHttpClient {
+        return OkHttpClient.Builder()
+            .connectTimeout(45, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS)
+            .addInterceptor(SecurityAuthInterceptor(sessionManager, addJsonAcceptHeader = false))
+            .addInterceptor(RenderColdStartInterceptor())
+            .build()
+    }
+
     fun provideApiService(okHttpClient: OkHttpClient, moshi: Moshi): ApiService {
         return Retrofit.Builder()
             .baseUrl(BASE_URL)
