@@ -61,6 +61,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var activePeerId: String = ""
     private var activePeerName: String = ""
     private var activeIsVideo: Boolean = false
+    private var hasAppliedRemoteAnswer: Boolean = false
+    private var hasSentConnectedSignal: Boolean = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
     private var attachedLocalRenderer: SurfaceViewRenderer? = null
     private var attachedRemoteRenderer: SurfaceViewRenderer? = null
@@ -151,26 +153,68 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is SignalingEvent.CallAnswerReceived -> {
                         val current = _callState.value
-                        val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
-                        val matchesPeer = event.callerId.isBlank() || event.callerId.equals(current.let {
-                            when (it) {
-                                is CallState.OutgoingRinging -> it.peerId
-                                is CallState.Connecting -> it.peerId
-                                else -> activePeerId
-                            }
-                        }, ignoreCase = true)
+                        val hasExplicitCallMatch = event.callId.isNotBlank() &&
+                            activeCallId.isNotBlank() &&
+                            event.callId == activeCallId
+                        val currentPeerId = when (current) {
+                            is CallState.OutgoingRinging -> current.peerId
+                            is CallState.Connecting -> current.peerId
+                            else -> activePeerId
+                        }
+                        val myId = app.sessionManager.getCurrentSession()?.userId
+                        val isSelfSender = !myId.isNullOrBlank() && event.callerId.equals(myId, ignoreCase = true)
+                        val matchesPeer = event.callerId.isBlank() ||
+                            event.callerId.equals(currentPeerId, ignoreCase = true)
+                        val matchesThisCall = hasExplicitCallMatch ||
+                            ((event.callId.isBlank() || activeCallId.isBlank()) && matchesPeer && !isSelfSender)
+
                         if ((current is CallState.OutgoingRinging || current is CallState.Connecting) &&
-                            matchesCall &&
-                            matchesPeer
+                            matchesThisCall
                         ) {
-                            NotificationHelper.stopOutgoingRingback()
+                            NotificationHelper.stopRingtoneAndVibrate(app)
                             val peerId = if (current is CallState.OutgoingRinging) current.peerId else activePeerId
                             val peerName = if (current is CallState.OutgoingRinging) current.peerName else activePeerName
                             val isVid = if (current is CallState.OutgoingRinging) current.isVideo else activeIsVideo
                             transitionToConnecting(peerId, peerName, isVid)
-                            webRTCClient?.handleRemoteAnswer(event.sdp)
+                            if (!hasAppliedRemoteAnswer && event.sdp.isNotBlank()) {
+                                hasAppliedRemoteAnswer = true
+                                webRTCClient?.handleRemoteAnswer(event.sdp)
+                            }
                             drainPendingIce()
                             syncRenderersToClient()
+                        }
+                    }
+                    is SignalingEvent.CallConnected -> {
+                        val current = _callState.value
+                        val hasExplicitCallMatch = event.callId.isNotBlank() &&
+                            activeCallId.isNotBlank() &&
+                            event.callId == activeCallId
+                        val currentPeerId = when (current) {
+                            is CallState.OutgoingRinging -> current.peerId
+                            is CallState.Connecting -> current.peerId
+                            else -> activePeerId
+                        }
+                        val matchesPeer = event.peerId.isBlank() ||
+                            event.peerId.equals(currentPeerId, ignoreCase = true)
+                        val matchesThisCall = hasExplicitCallMatch ||
+                            ((event.callId.isBlank() || activeCallId.isBlank()) && matchesPeer)
+
+                        if ((current is CallState.OutgoingRinging || current is CallState.Connecting) &&
+                            matchesThisCall
+                        ) {
+                            NotificationHelper.stopRingtoneAndVibrate(app)
+                            val peerId = if (current is CallState.OutgoingRinging) current.peerId else activePeerId
+                            val peerName = if (current is CallState.OutgoingRinging) current.peerName else activePeerName
+                            val isVid = if (current is CallState.OutgoingRinging) current.isVideo else activeIsVideo
+                            transitionToConnecting(peerId, peerName, isVid)
+                            if (!hasAppliedRemoteAnswer && event.sdp.isNotBlank()) {
+                                hasAppliedRemoteAnswer = true
+                                webRTCClient?.handleRemoteAnswer(event.sdp)
+                                drainPendingIce()
+                                syncRenderersToClient()
+                            } else if (!hasAppliedRemoteAnswer) {
+                                launch { repository.pollIncomingCallsOnce(includeActiveCalls = true) }
+                            }
                         }
                     }
                     is SignalingEvent.IceCandidateReceived -> {
@@ -214,10 +258,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     fun startOutgoingCall(peerId: String, peerName: String, isVideo: Boolean) {
         viewModelScope.launch {
             app.sessionManager.getCurrentSession() ?: return@launch
+            if (!signalingClient.isConnected.value) {
+                signalingClient.connect()
+            }
             activeCallId = UUID.randomUUID().toString()
             activePeerId = peerId
             activePeerName = peerName
             activeIsVideo = isVideo
+            hasAppliedRemoteAnswer = false
+            hasSentConnectedSignal = false
             _isMuted.value = false
             _isSpeakerOn.value = isVideo
             _isVideoEnabled.value = isVideo
@@ -236,7 +285,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
             startActiveCallForegroundService(peerName, isVideo)
 
-            val iceServers = withTimeoutOrNull(2_500L) { repository.fetchIceServers() }.orEmpty()
+            val cachedIce = repository.getCachedIceServers()
+            val iceServers = if (cachedIce.isNotEmpty()) {
+                launch { repository.fetchIceServers() }
+                cachedIce
+            } else {
+                withTimeoutOrNull(1_200L) { repository.fetchIceServers() }.orEmpty()
+            }
             if (_callState.value !is CallState.OutgoingRinging) return@launch
             client.startPeerConnection(isVideo = isVideo, customIceServers = iceServers)
             syncRenderersToClient()
@@ -249,10 +304,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         NotificationHelper.stopRingtoneAndVibrate(app)
 
         viewModelScope.launch {
+            if (!signalingClient.isConnected.value) {
+                signalingClient.connect()
+            }
             activeCallId = incoming.callId.ifBlank { activeCallId.ifBlank { UUID.randomUUID().toString() } }
             activePeerId = incoming.callerId
             activePeerName = incoming.callerName
             activeIsVideo = incoming.isVideo
+            hasAppliedRemoteAnswer = false
+            hasSentConnectedSignal = false
             _isMuted.value = false
             _isSpeakerOn.value = incoming.isVideo
             _isVideoEnabled.value = incoming.isVideo
@@ -269,13 +329,23 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
             startActiveCallForegroundService(incoming.callerName, incoming.isVideo)
 
-            val iceServers = withTimeoutOrNull(2_500L) { repository.fetchIceServers() }.orEmpty()
+            val cachedIce = repository.getCachedIceServers()
+            val iceServers = if (cachedIce.isNotEmpty()) {
+                launch { repository.fetchIceServers() }
+                cachedIce
+            } else {
+                withTimeoutOrNull(1_200L) { repository.fetchIceServers() }.orEmpty()
+            }
             if (_callState.value !is CallState.Connecting) return@launch
             client.startPeerConnection(isVideo = incoming.isVideo, customIceServers = iceServers)
             syncRenderersToClient()
             client.handleRemoteOfferAndCreateAnswer(incoming.offerSdp, incoming.isVideo)
             drainPendingIce()
         }
+    }
+
+    fun onAudioPermissionGranted() {
+        webRTCClient?.ensureAudioActive(muted = _isMuted.value, speakerOn = _isSpeakerOn.value)
     }
 
     fun onCameraPermissionGranted() {
@@ -380,6 +450,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         activePeerId = ""
         activePeerName = ""
         activeIsVideo = false
+        hasAppliedRemoteAnswer = false
+        hasSentConnectedSignal = false
         pendingRemoteIce.clear()
         _callState.value = CallState.Ended(reason)
 
@@ -578,7 +650,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun transitionToConnecting(peerId: String, peerName: String, isVideo: Boolean) {
-        NotificationHelper.stopOutgoingRingback()
+        NotificationHelper.stopRingtoneAndVibrate(app)
         if (_callState.value is CallState.Connected || _callState.value is CallState.Connecting) return
         _callState.value = CallState.Connecting(peerId, peerName, isVideo)
         connectTimeoutJob?.cancel()
@@ -591,12 +663,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun transitionToConnected(peerId: String, peerName: String, isVideo: Boolean) {
-        NotificationHelper.stopOutgoingRingback()
+        NotificationHelper.stopRingtoneAndVibrate(app)
         connectTimeoutJob?.cancel()
         connectTimeoutJob = null
         if (_callState.value is CallState.Connected) return
         _callState.value = CallState.Connected(peerId, peerName, isVideo)
-        webRTCClient?.setSpeakerphoneOn(_isSpeakerOn.value)
+        webRTCClient?.ensureAudioActive(muted = _isMuted.value, speakerOn = _isSpeakerOn.value)
+        if (!hasSentConnectedSignal && activeCallId.isNotBlank() && peerId.isNotBlank()) {
+            hasSentConnectedSignal = true
+            val callIdSnapshot = activeCallId
+            viewModelScope.launch {
+                val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
+                signalingClient.sendCallConnected(callIdSnapshot, myId, peerId)
+                repository.sendCallSignal(
+                    type = "connected",
+                    callId = callIdSnapshot,
+                    receiverId = peerId,
+                    isVideo = isVideo
+                )
+            }
+        }
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
             _callDurationSeconds.value = 0L

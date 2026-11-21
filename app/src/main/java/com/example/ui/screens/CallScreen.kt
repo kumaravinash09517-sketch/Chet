@@ -75,6 +75,7 @@ fun CallScreen(
     hasRemoteVideo: Boolean,
     durationSeconds: Long,
     onAttachRenderers: (local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) -> Unit,
+    onAudioPermissionGranted: () -> Unit = {},
     onCameraPermissionGranted: () -> Unit,
     onAcceptIncoming: () -> Unit,
     onDeclineIncoming: () -> Unit,
@@ -130,6 +131,9 @@ fun CallScreen(
         val camGranted = results[Manifest.permission.CAMERA] == true ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
+        if (micGranted) {
+            onAudioPermissionGranted()
+        }
         if (isVideoCall && camGranted) {
             onCameraPermissionGranted()
         }
@@ -141,25 +145,27 @@ fun CallScreen(
         }
     }
 
-    // Request CAMERA / RECORD_AUDIO automatically if an active video call lacks runtime permissions
+    // Request RECORD_AUDIO (and CAMERA for video calls) automatically during active calls
     LaunchedEffect(isVideoCall, callState) {
-        if (isVideoCall &&
-            (callState is CallState.OutgoingRinging ||
-                callState is CallState.Connecting ||
-                callState is CallState.Connected)
+        if (callState is CallState.OutgoingRinging ||
+            callState is CallState.Connecting ||
+            callState is CallState.Connected
         ) {
             val missing = buildList {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     add(Manifest.permission.RECORD_AUDIO)
                 }
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                if (isVideoCall && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                     add(Manifest.permission.CAMERA)
                 }
             }
             if (missing.isNotEmpty()) {
                 callPermissionLauncher.launch(missing.toTypedArray())
             } else {
-                onCameraPermissionGranted()
+                onAudioPermissionGranted()
+                if (isVideoCall) {
+                    onCameraPermissionGranted()
+                }
             }
         }
     }

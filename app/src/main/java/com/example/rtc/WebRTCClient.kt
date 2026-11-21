@@ -67,6 +67,8 @@ class WebRTCClient(
     private var remoteRenderer: SurfaceViewRenderer? = null
     private var localAudioAdded = false
     private var localVideoAdded = false
+
+    @Volatile
     private var isRemoteDescriptionSet = false
     private val queuedRemoteIce = mutableListOf<IceCandidate>()
 
@@ -379,8 +381,12 @@ class WebRTCClient(
         peerConnection?.createOffer(
             SimpleSdpObserver(
                 onCreate = { sdp ->
-                    peerConnection?.setLocalDescription(SimpleSdpObserver(), sdp)
-                    onLocalSdpCreated(sdp)
+                    peerConnection?.setLocalDescription(
+                        SimpleSdpObserver(
+                            onSet = { onLocalSdpCreated(sdp) }
+                        ),
+                        sdp
+                    )
                 }
             ),
             constraints
@@ -388,12 +394,10 @@ class WebRTCClient(
     }
 
     fun handleRemoteOfferAndCreateAnswer(offerSdp: String, isVideo: Boolean) {
-        val remoteDesc = SessionDescription(SessionDescription.Type.OFFER, offerSdp)
+        val remoteDesc = SessionDescription(SessionDescription.Type.OFFER, normalizeSdp(offerSdp))
         peerConnection?.setRemoteDescription(
             SimpleSdpObserver(
                 onSet = {
-                    isRemoteDescriptionSet = true
-                    flushQueuedRemoteIce()
                     val constraints = MediaConstraints().apply {
                         mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
                         mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", isVideo.toString()))
@@ -401,12 +405,17 @@ class WebRTCClient(
                     peerConnection?.createAnswer(
                         SimpleSdpObserver(
                             onCreate = { answerSdp ->
-                                peerConnection?.setLocalDescription(SimpleSdpObserver(), answerSdp)
-                                onLocalSdpCreated(answerSdp)
+                                peerConnection?.setLocalDescription(
+                                    SimpleSdpObserver(
+                                        onSet = { onLocalSdpCreated(answerSdp) }
+                                    ),
+                                    answerSdp
+                                )
                             }
                         ),
                         constraints
                     )
+                    flushQueuedRemoteIceAndMarkSet()
                 }
             ),
             remoteDesc
@@ -414,12 +423,11 @@ class WebRTCClient(
     }
 
     fun handleRemoteAnswer(answerSdp: String) {
-        val remoteDesc = SessionDescription(SessionDescription.Type.ANSWER, answerSdp)
+        val remoteDesc = SessionDescription(SessionDescription.Type.ANSWER, normalizeSdp(answerSdp))
         peerConnection?.setRemoteDescription(
             SimpleSdpObserver(
                 onSet = {
-                    isRemoteDescriptionSet = true
-                    flushQueuedRemoteIce()
+                    flushQueuedRemoteIceAndMarkSet()
                 }
             ),
             remoteDesc
@@ -427,25 +435,55 @@ class WebRTCClient(
     }
 
     fun addRemoteIceCandidate(sdpMid: String, sdpMLineIndex: Int, candidate: String) {
-        val ice = IceCandidate(sdpMid, sdpMLineIndex, candidate)
+        val cleanCandidate = candidate.trim()
+        if (cleanCandidate.isEmpty()) return
+        val ice = IceCandidate(sdpMid, sdpMLineIndex, cleanCandidate)
         val pc = peerConnection
-        if (pc != null && isRemoteDescriptionSet) {
-            pc.addIceCandidate(ice)
-        } else {
-            synchronized(queuedRemoteIce) {
+        val addImmediately = synchronized(queuedRemoteIce) {
+            if (pc != null && isRemoteDescriptionSet) {
+                true
+            } else {
                 queuedRemoteIce.add(ice)
+                false
             }
+        }
+        if (addImmediately) {
+            pc?.addIceCandidate(ice)
         }
     }
 
-    private fun flushQueuedRemoteIce() {
-        val pc = peerConnection ?: return
+    private fun flushQueuedRemoteIceAndMarkSet() {
+        val pc = peerConnection
         val copy = synchronized(queuedRemoteIce) {
+            isRemoteDescriptionSet = true
             val list = queuedRemoteIce.toList()
             queuedRemoteIce.clear()
             list
         }
-        copy.forEach { pc.addIceCandidate(it) }
+        if (pc != null) {
+            copy.forEach { pc.addIceCandidate(it) }
+        }
+    }
+
+    fun ensureAudioActive(muted: Boolean, speakerOn: Boolean) {
+        runCatching {
+            localAudioTrack?.setEnabled(!muted)
+            remoteAudioTrack?.setEnabled(true)
+            remoteAudioTrack?.setVolume(1.0)
+            audioDeviceModule.setMicrophoneMute(muted)
+            audioDeviceModule.setSpeakerMute(false)
+            configureAudioForCall(speakerOn = speakerOn)
+            audioManager.isMicrophoneMute = muted
+        }
+    }
+
+    private fun normalizeSdp(raw: String): String {
+        val unescaped = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+        val lfNormalized = unescaped
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .trim()
+        return if (lfNormalized.isEmpty()) "" else lfNormalized.replace("\n", "\r\n") + "\r\n"
     }
 
     fun setMicMuted(muted: Boolean) {

@@ -550,4 +550,64 @@ class ExampleRobolectricTest {
         assertEquals("u1", servers[1].username)
         assertEquals("secret1", servers[1].credential)
     }
+
+    @Test
+    fun `callSignalDeduplicator keeps offer answer connected and hangup distinct even with shared record id`() {
+        com.example.data.repository.CallSignalDeduplicator.clear()
+        val offerKey = com.example.data.repository.CallSignalDeduplicator.buildKey(
+            type = "offer",
+            callId = "c_shared",
+            senderId = "u_avinash",
+            payload = "v=0\roffer",
+            signalId = "row_999"
+        )
+        val answerKey = com.example.data.repository.CallSignalDeduplicator.buildKey(
+            type = "answer",
+            callId = "c_shared",
+            senderId = "u_sandeep",
+            payload = "v=0\ranswer",
+            signalId = "row_999"
+        )
+        val connectedKey = com.example.data.repository.CallSignalDeduplicator.buildKey(
+            type = "connected",
+            callId = "c_shared",
+            senderId = "u_sandeep",
+            payload = "",
+            signalId = "row_999"
+        )
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.markIfNew(offerKey))
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.markIfNew(answerKey))
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.markIfNew(connectedKey))
+        org.junit.Assert.assertFalse(com.example.data.repository.CallSignalDeduplicator.markIfNew(answerKey))
+        com.example.data.repository.CallSignalDeduplicator.clear()
+    }
+
+    @Test
+    fun `parseCallSignalsFromBody parses connected and accepted signals cleanly and CallSignalRequest preserves null callerId`() {
+        val json = """
+            {
+              "signals": [
+                {"id":"s_conn_sdp","status":"connected","callId":"c_600","senderId":"u_sandeep","receiverId":"u_avinash","answer":"v=0\r\nconn_ans"},
+                {"id":"s_conn_only","type":"call_connected","callId":"c_600","senderId":"u_sandeep","receiverId":"u_avinash"}
+              ]
+            }
+        """.trimIndent()
+        val parsed = com.example.data.remote.BackendJsonParsers.parseCallSignalsFromBody(json)
+        assertEquals(2, parsed.size)
+        assertEquals("answer", parsed[0].type)
+        assertEquals("v=0\r\nconn_ans", parsed[0].sdp)
+        assertEquals("connected", parsed[1].type)
+        assertEquals("u_sandeep", parsed[1].senderId)
+
+        val answerReq = com.example.data.remote.CallSignalRequest(
+            type = "answer",
+            callId = "c_600",
+            senderId = "u_sandeep",
+            receiverId = "u_avinash",
+            sdp = "v=0\r\nans"
+        )
+        assertEquals(null, answerReq.callerId)
+        assertEquals("u_sandeep", answerReq.senderId)
+        assertEquals("u_avinash", answerReq.receiverId)
+    }
 }

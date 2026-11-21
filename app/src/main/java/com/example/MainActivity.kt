@@ -155,6 +155,7 @@ class MainActivity : ComponentActivity() {
             val autoAccept = intent.getBooleanExtra(NotificationHelper.EXTRA_AUTO_ACCEPT, false)
             callViewModel.injectIncomingCallFromIntent(callId, callerId, callerName, isVideo, sdp)
             if (autoAccept) {
+                NotificationHelper.stopRingtoneAndVibrate(this)
                 callViewModel.acceptIncomingCall()
             }
             return
@@ -269,6 +270,7 @@ private fun HelloSirRoot(
                 hasRemoteVideo = hasRemoteVideo,
                 durationSeconds = duration,
                 onAttachRenderers = { local, remote -> callViewModel.attachRenderers(local, remote) },
+                onAudioPermissionGranted = { callViewModel.onAudioPermissionGranted() },
                 onCameraPermissionGranted = { callViewModel.onCameraPermissionGranted() },
                 onAcceptIncoming = { callViewModel.acceptIncomingCall() },
                 onDeclineIncoming = { callViewModel.declineIncomingCall() },

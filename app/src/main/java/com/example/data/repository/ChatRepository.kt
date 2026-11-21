@@ -252,7 +252,9 @@ object CallSignalDeduplicator {
         signalId: String? = null
     ): String {
         val cleanId = signalId?.trim()?.takeIf { it.isNotBlank() }
-        if (cleanId != null) return "id:$cleanId"
+        if (cleanId != null) {
+            return "${type.lowercase()}|id:$cleanId|${senderId.lowercase()}|${payload.hashCode()}"
+        }
         return "${type.lowercase()}|$callId|${senderId.lowercase()}|${payload.hashCode()}"
     }
 
@@ -308,6 +310,9 @@ class ChatRepository(
     @Volatile
     private var fastCallPolling: Boolean = false
 
+    @Volatile
+    private var cachedIceServers: List<IceServerDto> = emptyList()
+
     val sessionFlow: Flow<UserSession?> = sessionManager.sessionFlow
     val conversationsFlow: Flow<List<ConversationEntity>> = conversationDao.observeConversations()
     val usersFlow: Flow<List<UserEntity>> = userDao.observeAllUsers()
@@ -349,7 +354,7 @@ class ChatRepository(
         callPollingJob = scope.launch {
             var includeActive = true
             while (isActive) {
-                pollIncomingCallsOnce(includeActiveCalls = includeActive)
+                pollIncomingCallsOnce(includeActiveCalls = includeActive || fastCallPolling)
                 includeActive = false
                 delay(if (fastCallPolling) 850L else 2_000L)
             }
@@ -376,13 +381,29 @@ class ChatRepository(
             }
         }
 
-        for (signal in collected) {
+        for (rawSignal in collected) {
+            // If backend active/poll row keeps callerId == myId without senderId on response states (answer/ringing/connected/decline),
+            // infer peer from receiverId so caller does not drop callee's response as a self-echo.
+            val signal = if (
+                rawSignal.type in setOf("answer", "ringing", "connected", "decline") &&
+                rawSignal.senderId.equals(myId, ignoreCase = true) &&
+                rawSignal.receiverId.isNotBlank() &&
+                !rawSignal.receiverId.equals(myId, ignoreCase = true)
+            ) {
+                rawSignal.copy(
+                    senderId = rawSignal.receiverId,
+                    receiverId = myId
+                )
+            } else {
+                rawSignal
+            }
+
             if (signal.senderId.equals(myId, ignoreCase = true)) continue
             if (signal.receiverId.isNotBlank() && !signal.receiverId.equals(myId, ignoreCase = true)) continue
             if (signal.type == "offer" && CallSignalDeduplicator.isDismissed(signal.callId)) continue
 
             val payloadHint = when (signal.type) {
-                "offer", "answer" -> signal.sdp
+                "offer", "answer", "connected" -> signal.sdp
                 "ice" -> "${signal.candidate}|${signal.sdpMid}|${signal.sdpMLineIndex}"
                 else -> ""
             }
@@ -428,6 +449,24 @@ class ChatRepository(
                         )
                     }
                 }
+                "connected" -> {
+                    if (signal.sdp.isNotBlank()) {
+                        signalingClient.emitExternalEvent(
+                            SignalingEvent.CallAnswerReceived(
+                                callerId = signal.senderId,
+                                sdp = signal.sdp,
+                                callId = signal.callId
+                            )
+                        )
+                    }
+                    signalingClient.emitExternalEvent(
+                        SignalingEvent.CallConnected(
+                            callId = signal.callId,
+                            peerId = signal.senderId,
+                            sdp = signal.sdp
+                        )
+                    )
+                }
                 "ice" -> {
                     if (signal.candidate.isNotBlank()) {
                         signalingClient.emitExternalEvent(
@@ -467,13 +506,16 @@ class ChatRepository(
     ): Boolean = withContext(Dispatchers.IO) {
         val session = sessionManager.getCurrentSession() ?: return@withContext false
         if (receiverId.isBlank() || callId.isBlank()) return@withContext false
+        val isOffer = type.equals("offer", ignoreCase = true)
         return@withContext runCatching {
             val response = apiService.sendCallSignal(
                 CallSignalRequest(
                     type = type,
                     callId = callId,
                     senderId = session.userId,
+                    callerId = if (isOffer) session.userId else null,
                     senderName = session.displayName,
+                    callerName = if (isOffer) session.displayName else null,
                     receiverId = receiverId,
                     isVideo = isVideo,
                     sdp = sdp,
@@ -495,6 +537,7 @@ class ChatRepository(
                         syncUserDirectory()
                         retryPendingMessages()
                         pollIncomingCallsOnce(includeActiveCalls = true)
+                        launch { fetchIceServers() }
                     }
                     is SignalingEvent.DirectoryUpdated -> {
                         syncUserDirectory()
@@ -551,6 +594,11 @@ class ChatRepository(
                     is SignalingEvent.CallAnswerReceived -> {
                         CallSignalDeduplicator.markIfNew(
                             CallSignalDeduplicator.buildKey("answer", event.callId, event.callerId, event.sdp)
+                        )
+                    }
+                    is SignalingEvent.CallConnected -> {
+                        CallSignalDeduplicator.markIfNew(
+                            CallSignalDeduplicator.buildKey("connected", event.callId, event.peerId, event.sdp)
                         )
                     }
                     is SignalingEvent.IceCandidateReceived -> {
@@ -1688,16 +1736,22 @@ class ChatRepository(
         signalingClient.sendTyping(myId, peerId, isTyping)
     }
 
+    fun getCachedIceServers(): List<IceServerDto> = cachedIceServers
+
     suspend fun fetchIceServers(): List<IceServerDto> = withContext(Dispatchers.IO) {
         return@withContext try {
             val response = apiService.getIceServers()
             if (response.isSuccessful) {
-                BackendJsonParsers.parseIceServersFromBody(response.body()?.string())
+                val parsed = BackendJsonParsers.parseIceServersFromBody(response.body()?.string())
+                if (parsed.isNotEmpty()) {
+                    cachedIceServers = parsed
+                }
+                parsed
             } else {
-                emptyList()
+                cachedIceServers
             }
         } catch (_: Exception) {
-            emptyList()
+            cachedIceServers
         }
     }
 

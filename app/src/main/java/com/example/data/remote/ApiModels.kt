@@ -476,12 +476,12 @@ data class CallSignalRequest(
     @Json(name = "call_id") val callIdSnake: String = callId,
     @Json(name = "senderId") val senderId: String,
     @Json(name = "sender_id") val senderIdSnake: String = senderId,
-    @Json(name = "callerId") val callerId: String = senderId,
-    @Json(name = "caller_id") val callerIdSnake: String = senderId,
+    @Json(name = "callerId") val callerId: String? = null,
+    @Json(name = "caller_id") val callerIdSnake: String? = callerId,
     @Json(name = "senderName") val senderName: String? = null,
     @Json(name = "sender_name") val senderNameSnake: String? = senderName,
-    @Json(name = "callerName") val callerName: String? = senderName,
-    @Json(name = "caller_name") val callerNameSnake: String? = senderName,
+    @Json(name = "callerName") val callerName: String? = null,
+    @Json(name = "caller_name") val callerNameSnake: String? = callerName,
     @Json(name = "receiverId") val receiverId: String,
     @Json(name = "receiver_id") val receiverIdSnake: String = receiverId,
     @Json(name = "toUserId") val toUserId: String = receiverId,
@@ -634,21 +634,32 @@ object BackendJsonParsers {
 
         val sdpObj = data.optJSONObject("offer")
             ?: data.optJSONObject("sdp")
+            ?: root.optJSONObject("offer")
+            ?: root.optJSONObject("sdp")
         val answerObj = data.optJSONObject("answer")
-        val offerSdp = firstNonBlankString(data, "offerSdp", "offer_sdp")
+            ?: root.optJSONObject("answer")
+        val offerSdp = firstNonBlankString(data, "offerSdp", "offer_sdp", "offer")
+            ?: firstNonBlankString(root, "offerSdp", "offer_sdp", "offer")
             ?: sdpObj?.let { firstNonBlankString(it, "sdp", "description") }
             ?: ""
-        val answerSdp = firstNonBlankString(data, "answerSdp", "answer_sdp")
+        val answerSdp = firstNonBlankString(data, "answerSdp", "answer_sdp", "answer")
+            ?: firstNonBlankString(root, "answerSdp", "answer_sdp", "answer")
             ?: answerObj?.let { firstNonBlankString(it, "sdp", "description") }
             ?: ""
-        val genericSdp = firstNonBlankString(data, "sdp") ?: ""
+        val genericSdp = firstNonBlankString(data, "sdp")
+            ?: firstNonBlankString(root, "sdp")
+            ?: ""
 
         val initialNorm = normalizeCallSignalType(rawType)
+        val rawLower = rawType.trim().lowercase()
         val normalizedType = when {
-            // /api/calls/active often returns an active call row with status="ringing" + offer SDP
-            (rawType.trim().lowercase() in setOf("ringing", "call_ringing", "active", "pending", "waiting")) &&
-                (offerSdp.isNotBlank() || (genericSdp.isNotBlank() && answerSdp.isBlank())) -> "offer"
-            (rawType.trim().lowercase() in setOf("active", "answered")) && answerSdp.isNotBlank() -> "answer"
+            // /api/calls/active often returns an active call row with status="ringing" + offer SDP or status="answered"/"connected" + answer SDP
+            (rawLower in setOf("ringing", "call_ringing", "active", "pending", "waiting")) &&
+                answerSdp.isNotBlank() -> "answer"
+            (rawLower in setOf("ringing", "call_ringing", "active", "pending", "waiting")) &&
+                (offerSdp.isNotBlank() || genericSdp.isNotBlank()) -> "offer"
+            (rawLower in setOf("active", "answered", "connected", "call_connected", "accepted", "call_accepted")) &&
+                (answerSdp.isNotBlank() || genericSdp.isNotBlank()) -> "answer"
             initialNorm != null -> initialNorm
             else -> return null
         }
@@ -656,6 +667,7 @@ object BackendJsonParsers {
         val resolvedSdp = when (normalizedType) {
             "offer" -> offerSdp.ifBlank { genericSdp }
             "answer" -> answerSdp.ifBlank { genericSdp }
+            "connected" -> answerSdp.ifBlank { genericSdp }
             else -> genericSdp
         }
 
@@ -748,15 +760,23 @@ object BackendJsonParsers {
             ?: data.optJSONObject("ice")
             ?: data.optJSONObject("iceCandidate")
             ?: data.optJSONObject("ice_candidate")
+            ?: root.optJSONObject("candidate")
+            ?: root.optJSONObject("ice")
+            ?: root.optJSONObject("iceCandidate")
+            ?: root.optJSONObject("ice_candidate")
         val candidate = firstNonBlankString(data, "candidate", "iceCandidate", "ice_candidate")
+            ?: firstNonBlankString(root, "candidate", "iceCandidate", "ice_candidate")
             ?: iceObj?.let { firstNonBlankString(it, "candidate", "sdp") }
             ?: ""
         val sdpMid = firstNonBlankString(data, "sdpMid", "sdp_mid")
+            ?: firstNonBlankString(root, "sdpMid", "sdp_mid")
             ?: iceObj?.let { firstNonBlankString(it, "sdpMid", "sdp_mid") }
             ?: ""
         val sdpMLineIndex = when {
             data.has("sdpMLineIndex") && !data.isNull("sdpMLineIndex") -> data.optInt("sdpMLineIndex", 0)
             data.has("sdp_m_line_index") && !data.isNull("sdp_m_line_index") -> data.optInt("sdp_m_line_index", 0)
+            root.has("sdpMLineIndex") && !root.isNull("sdpMLineIndex") -> root.optInt("sdpMLineIndex", 0)
+            root.has("sdp_m_line_index") && !root.isNull("sdp_m_line_index") -> root.optInt("sdp_m_line_index", 0)
             iceObj != null && iceObj.has("sdpMLineIndex") && !iceObj.isNull("sdpMLineIndex") -> iceObj.optInt("sdpMLineIndex", 0)
             iceObj != null && iceObj.has("sdp_m_line_index") && !iceObj.isNull("sdp_m_line_index") -> iceObj.optInt("sdp_m_line_index", 0)
             else -> 0
@@ -791,6 +811,7 @@ object BackendJsonParsers {
             "offer", "call_offer", "offering", "incoming_call" -> "offer"
             "ringing", "call_ringing" -> "ringing"
             "answer", "call_answer", "answered", "accept", "call_accept" -> "answer"
+            "connected", "call_connected", "accepted", "call_accepted" -> "connected"
             "ice", "ice_candidate", "candidate" -> "ice"
             "hangup", "call_hangup", "end", "call_end", "ended" -> "hangup"
             "decline", "call_decline", "reject", "call_reject", "declined", "rejected" -> "decline"

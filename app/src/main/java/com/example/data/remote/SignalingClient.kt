@@ -64,6 +64,12 @@ sealed interface SignalingEvent {
         val callId: String = ""
     ) : SignalingEvent
 
+    data class CallConnected(
+        val callId: String,
+        val peerId: String,
+        val sdp: String = ""
+    ) : SignalingEvent
+
     data class IceCandidateReceived(
         val senderId: String,
         val sdpMid: String,
@@ -206,7 +212,10 @@ class SignalingClient(
         try {
             val json = JSONObject(raw)
             val data = json.optJSONObject("data") ?: json.optJSONObject("payload") ?: json
-            when (json.optString("type").trim().lowercase()) {
+            val rawEventType = firstNonBlank(json, "type", "event", "signalType", "signal_type")
+                ?: firstNonBlank(data, "type", "event", "signalType", "signal_type")
+                ?: ""
+            when (rawEventType.trim().lowercase()) {
                 "blocked", "error_403" -> {
                     GlobalSecurityEventBus.emitBlocked(
                         json.optString("message").ifBlank { "You are blocked by the administrator." }
@@ -302,11 +311,15 @@ class SignalingClient(
                     }
                 }
                 "ringing", "call_ringing" -> {
-                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "receiverId", "callerId").orEmpty()
-                    val callId = firstNonBlank(data, "callId", "call_id").orEmpty()
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "receiverId", "callerId")
+                        ?: firstNonBlank(json, "senderId", "sender_id", "from", "calleeId", "receiverId", "callerId")
+                        ?: ""
+                    val callId = firstNonBlank(data, "callId", "call_id")
+                        ?: firstNonBlank(json, "callId", "call_id")
+                        ?: ""
                     _events.tryEmit(SignalingEvent.CallRinging(callId = callId, peerId = peerId))
                 }
-                "call_answer", "answer" -> {
+                "call_answer", "answer", "answered", "accept", "call_accept" -> {
                     val signal = BackendJsonParsers.parseSingleCallSignal(json)
                     if (signal != null && signal.sdp.isNotBlank()) {
                         _events.tryEmit(
@@ -318,13 +331,113 @@ class SignalingClient(
                         )
                     } else {
                         val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "peerId", "callerId")
-                        val sdp = data.optString("sdp")
+                            ?: firstNonBlank(json, "senderId", "sender_id", "from", "calleeId", "peerId", "callerId")
+                        val sdp = firstNonBlank(data, "sdp", "answerSdp", "answer_sdp")
+                            ?: firstNonBlank(json, "sdp", "answerSdp", "answer_sdp")
+                            ?: ""
                         if (!peerId.isNullOrBlank() && sdp.isNotBlank()) {
                             _events.tryEmit(
                                 SignalingEvent.CallAnswerReceived(
                                     callerId = peerId,
                                     sdp = sdp,
-                                    callId = firstNonBlank(data, "callId", "call_id").orEmpty()
+                                    callId = firstNonBlank(data, "callId", "call_id")
+                                        ?: firstNonBlank(json, "callId", "call_id")
+                                        ?: ""
+                                )
+                            )
+                        }
+                    }
+                }
+                "connected", "call_connected", "accepted", "call_accepted" -> {
+                    val signal = BackendJsonParsers.parseSingleCallSignal(json)
+                    val peerId = signal?.senderId
+                        ?: firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "peerId", "callerId")
+                        ?: firstNonBlank(json, "senderId", "sender_id", "from", "calleeId", "peerId", "callerId")
+                        ?: ""
+                    val callId = signal?.callId?.takeIf { it.isNotBlank() }
+                        ?: firstNonBlank(data, "callId", "call_id")
+                        ?: firstNonBlank(json, "callId", "call_id")
+                        ?: ""
+                    val sdp = signal?.sdp?.takeIf { it.isNotBlank() }
+                        ?: firstNonBlank(data, "sdp", "answerSdp", "answer_sdp")
+                        ?: firstNonBlank(json, "sdp", "answerSdp", "answer_sdp")
+                        ?: ""
+                    if (sdp.isNotBlank()) {
+                        _events.tryEmit(
+                            SignalingEvent.CallAnswerReceived(
+                                callerId = peerId,
+                                sdp = sdp,
+                                callId = callId
+                            )
+                        )
+                    }
+                    _events.tryEmit(
+                        SignalingEvent.CallConnected(
+                            callId = callId,
+                            peerId = peerId,
+                            sdp = sdp
+                        )
+                    )
+                }
+                "call_signal", "signal" -> {
+                    val signal = BackendJsonParsers.parseSingleCallSignal(json)
+                    if (signal != null) {
+                        when (signal.type) {
+                            "offer" -> if (signal.sdp.isNotBlank()) {
+                                _events.tryEmit(
+                                    SignalingEvent.IncomingCallOffer(
+                                        callId = signal.callId,
+                                        callerId = signal.senderId,
+                                        callerName = signal.senderName,
+                                        isVideo = signal.isVideo,
+                                        sdp = signal.sdp
+                                    )
+                                )
+                            }
+                            "ringing" -> _events.tryEmit(SignalingEvent.CallRinging(signal.callId, signal.senderId))
+                            "answer" -> if (signal.sdp.isNotBlank()) {
+                                _events.tryEmit(
+                                    SignalingEvent.CallAnswerReceived(
+                                        callerId = signal.senderId,
+                                        sdp = signal.sdp,
+                                        callId = signal.callId
+                                    )
+                                )
+                            }
+                            "connected" -> {
+                                if (signal.sdp.isNotBlank()) {
+                                    _events.tryEmit(
+                                        SignalingEvent.CallAnswerReceived(
+                                            callerId = signal.senderId,
+                                            sdp = signal.sdp,
+                                            callId = signal.callId
+                                        )
+                                    )
+                                }
+                                _events.tryEmit(
+                                    SignalingEvent.CallConnected(
+                                        callId = signal.callId,
+                                        peerId = signal.senderId,
+                                        sdp = signal.sdp
+                                    )
+                                )
+                            }
+                            "ice" -> if (signal.candidate.isNotBlank()) {
+                                _events.tryEmit(
+                                    SignalingEvent.IceCandidateReceived(
+                                        senderId = signal.senderId,
+                                        sdpMid = signal.sdpMid,
+                                        sdpMLineIndex = signal.sdpMLineIndex,
+                                        candidate = signal.candidate,
+                                        callId = signal.callId
+                                    )
+                                )
+                            }
+                            "hangup", "decline" -> _events.tryEmit(
+                                SignalingEvent.CallEnded(
+                                    peerId = signal.senderId,
+                                    reason = signal.type,
+                                    callId = signal.callId
                                 )
                             )
                         }
@@ -359,12 +472,16 @@ class SignalingClient(
                     }
                 }
                 "call_end", "call_reject", "hangup", "call_hangup", "decline", "call_decline", "end", "reject" -> {
-                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "peerId", "callerId").orEmpty()
-                    val callId = firstNonBlank(data, "callId", "call_id").orEmpty()
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "peerId", "callerId")
+                        ?: firstNonBlank(json, "senderId", "sender_id", "from", "peerId", "callerId")
+                        ?: ""
+                    val callId = firstNonBlank(data, "callId", "call_id")
+                        ?: firstNonBlank(json, "callId", "call_id")
+                        ?: ""
                     _events.tryEmit(
                         SignalingEvent.CallEnded(
                             peerId = peerId,
-                            reason = json.optString("type"),
+                            reason = rawEventType,
                             callId = callId
                         )
                     )
@@ -474,8 +591,11 @@ class SignalingClient(
                 put("callId", callId)
                 put("callerId", senderId)
                 put("senderId", senderId)
+                put("senderName", senderName)
                 put("callerName", senderName)
                 put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
                 put("isVideo", isVideo)
                 put("sdp", sdp)
             }
@@ -489,6 +609,8 @@ class SignalingClient(
                 if (callId.isNotBlank()) put("callId", callId)
                 put("senderId", senderId)
                 put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
             }
         )
     }
@@ -505,7 +627,26 @@ class SignalingClient(
                 if (callId.isNotBlank()) put("callId", callId)
                 put("senderId", senderId)
                 put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
                 put("sdp", sdp)
+            }
+        )
+    }
+
+    fun sendCallConnected(
+        callId: String,
+        senderId: String,
+        receiverId: String
+    ) {
+        sendRaw(
+            JSONObject().apply {
+                put("type", "call_connected")
+                if (callId.isNotBlank()) put("callId", callId)
+                put("senderId", senderId)
+                put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
             }
         )
     }
@@ -524,6 +665,8 @@ class SignalingClient(
                 if (callId.isNotBlank()) put("callId", callId)
                 put("senderId", senderId)
                 put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
                 put("sdpMid", sdpMid)
                 put("sdpMLineIndex", sdpMLineIndex)
                 put("candidate", candidate)
@@ -543,6 +686,8 @@ class SignalingClient(
                 if (callId.isNotBlank()) put("callId", callId)
                 put("senderId", senderId)
                 put("receiverId", receiverId)
+                put("toUserId", receiverId)
+                put("to", receiverId)
             }
         )
     }
