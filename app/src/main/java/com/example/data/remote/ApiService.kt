@@ -101,5 +101,5 @@ interface ApiService {
     suspend fun getActiveCalls(@Query("userId") userId: String): Response<ResponseBody>
 
     @GET("api/webrtc/ice-servers")
-    suspend fun getIceServers(): Response<IceServersResponse>
+    suspend fun getIceServers(): Response<ResponseBody>
 }

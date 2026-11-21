@@ -632,40 +632,96 @@ object BackendJsonParsers {
             ?: firstNonBlankString(data, "type", "event", "signalType", "signal_type", "action", "status")
             ?: return null
 
-        val normalizedType = normalizeCallSignalType(rawType) ?: return null
+        val sdpObj = data.optJSONObject("offer")
+            ?: data.optJSONObject("sdp")
+        val answerObj = data.optJSONObject("answer")
+        val offerSdp = firstNonBlankString(data, "offerSdp", "offer_sdp")
+            ?: sdpObj?.let { firstNonBlankString(it, "sdp", "description") }
+            ?: ""
+        val answerSdp = firstNonBlankString(data, "answerSdp", "answer_sdp")
+            ?: answerObj?.let { firstNonBlankString(it, "sdp", "description") }
+            ?: ""
+        val genericSdp = firstNonBlankString(data, "sdp") ?: ""
 
-        val senderId = firstNonBlankString(
-            data,
-            "callerId",
-            "caller_id",
-            "senderId",
-            "sender_id",
-            "from",
-            "fromUserId",
-            "from_user_id"
-        ) ?: firstNonBlankString(root, "callerId", "caller_id", "senderId", "sender_id", "from")
-            ?: return null
+        val initialNorm = normalizeCallSignalType(rawType)
+        val normalizedType = when {
+            // /api/calls/active often returns an active call row with status="ringing" + offer SDP
+            (rawType.trim().lowercase() in setOf("ringing", "call_ringing", "active", "pending", "waiting")) &&
+                (offerSdp.isNotBlank() || (genericSdp.isNotBlank() && answerSdp.isBlank())) -> "offer"
+            (rawType.trim().lowercase() in setOf("active", "answered")) && answerSdp.isNotBlank() -> "answer"
+            initialNorm != null -> initialNorm
+            else -> return null
+        }
 
-        val senderName = firstNonBlankString(
-            data,
-            "callerName",
-            "caller_name",
-            "senderName",
-            "sender_name",
-            "fromName",
-            "from_name"
-        ) ?: firstNonBlankString(root, "callerName", "caller_name", "senderName", "sender_name")
-            ?: senderId
+        val resolvedSdp = when (normalizedType) {
+            "offer" -> offerSdp.ifBlank { genericSdp }
+            "answer" -> answerSdp.ifBlank { genericSdp }
+            else -> genericSdp
+        }
+
+        // Prioritize explicit signal-actor keys ("senderId"/"from") BEFORE "callerId"
+        // because backend call records may keep "callerId" as the call initiator even on "answer"/"decline"/"ice".
+        val senderId = if (normalizedType == "offer") {
+            firstNonBlankString(
+                data,
+                "senderId",
+                "sender_id",
+                "callerId",
+                "caller_id",
+                "from",
+                "fromUserId",
+                "from_user_id"
+            ) ?: firstNonBlankString(root, "senderId", "sender_id", "callerId", "caller_id", "from")
+        } else {
+            firstNonBlankString(
+                data,
+                "senderId",
+                "sender_id",
+                "from",
+                "fromUserId",
+                "from_user_id",
+                "calleeId",
+                "callee_id",
+                "answererId",
+                "answerer_id",
+                "callerId",
+                "caller_id"
+            ) ?: firstNonBlankString(root, "senderId", "sender_id", "from", "calleeId", "callee_id", "callerId", "caller_id")
+        } ?: return null
+
+        val senderName = if (normalizedType == "offer") {
+            firstNonBlankString(
+                data,
+                "senderName",
+                "sender_name",
+                "callerName",
+                "caller_name",
+                "fromName",
+                "from_name"
+            ) ?: firstNonBlankString(root, "senderName", "sender_name", "callerName", "caller_name")
+        } else {
+            firstNonBlankString(
+                data,
+                "senderName",
+                "sender_name",
+                "fromName",
+                "from_name",
+                "calleeName",
+                "callee_name",
+                "callerName",
+                "caller_name"
+            ) ?: firstNonBlankString(root, "senderName", "sender_name", "callerName", "caller_name")
+        } ?: senderId
 
         val receiverId = firstNonBlankString(
             data,
             "receiverId",
             "receiver_id",
-            "calleeId",
-            "callee_id",
             "toUserId",
             "to_user_id",
-            "to"
+            "to",
+            "calleeId",
+            "callee_id"
         ) ?: firstNonBlankString(root, "receiverId", "receiver_id", "toUserId", "to")
             ?: ""
 
@@ -687,13 +743,6 @@ object BackendJsonParsers {
                 callKind?.equals("video", ignoreCase = true) == true
             }
         }
-
-        val sdpObj = data.optJSONObject("offer")
-            ?: data.optJSONObject("answer")
-            ?: data.optJSONObject("sdp")
-        val sdp = firstNonBlankString(data, "sdp", "offerSdp", "offer_sdp", "answerSdp", "answer_sdp")
-            ?: sdpObj?.let { firstNonBlankString(it, "sdp", "description") }
-            ?: ""
 
         val iceObj = data.optJSONObject("candidate")
             ?: data.optJSONObject("ice")
@@ -718,7 +767,7 @@ object BackendJsonParsers {
             ?: System.currentTimeMillis()
 
         // Validate required payload fields for offer/answer/ice
-        if ((normalizedType == "offer" || normalizedType == "answer") && sdp.isBlank()) return null
+        if ((normalizedType == "offer" || normalizedType == "answer") && resolvedSdp.isBlank()) return null
         if (normalizedType == "ice" && candidate.isBlank()) return null
 
         return RemoteCallSignalDto(
@@ -729,7 +778,7 @@ object BackendJsonParsers {
             senderName = senderName,
             receiverId = receiverId,
             isVideo = isVideo,
-            sdp = sdp,
+            sdp = resolvedSdp,
             candidate = candidate,
             sdpMid = sdpMid,
             sdpMLineIndex = sdpMLineIndex,
@@ -747,6 +796,48 @@ object BackendJsonParsers {
             "decline", "call_decline", "reject", "call_reject", "declined", "rejected" -> "decline"
             else -> null
         }
+    }
+
+    fun parseIceServersFromBody(rawJson: String?): List<IceServerDto> {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return emptyList()
+        return runCatching {
+            val array = when {
+                trimmed.startsWith("[") -> org.json.JSONArray(trimmed)
+                trimmed.startsWith("{") -> {
+                    val obj = org.json.JSONObject(trimmed)
+                    listOf("iceServers", "ice_servers", "servers", "data")
+                        .firstNotNullOfOrNull { key -> obj.optJSONArray(key) }
+                }
+                else -> null
+            } ?: return@runCatching emptyList()
+
+            val result = mutableListOf<IceServerDto>()
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val urls = mutableListOf<String>()
+                val urlsArr = item.optJSONArray("urls")
+                if (urlsArr != null) {
+                    for (j in 0 until urlsArr.length()) {
+                        urlsArr.optString(j).trim().takeIf { it.isNotBlank() && !it.equals("null", true) }
+                            ?.let { urls.add(it) }
+                    }
+                } else {
+                    val singleUrl = firstNonBlankString(item, "urls", "url")
+                    if (singleUrl != null) urls.add(singleUrl)
+                }
+                if (urls.isNotEmpty()) {
+                    result.add(
+                        IceServerDto(
+                            urls = urls,
+                            username = firstNonBlankString(item, "username", "user"),
+                            credential = firstNonBlankString(item, "credential", "password", "secret")
+                        )
+                    )
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
     }
 
     fun parseUsersFromBody(rawJson: String?): List<RemoteUserDto> {

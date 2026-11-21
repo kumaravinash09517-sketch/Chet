@@ -501,4 +501,53 @@ class ExampleRobolectricTest {
         assertTrue(com.example.data.repository.CallSignalDeduplicator.isDismissed("call_777"))
         com.example.data.repository.CallSignalDeduplicator.clear()
     }
+
+    @Test
+    fun `parseCallSignalsFromBody prioritizes senderId over callerId on answer ice decline and maps active ringing to offer`() {
+        val mixedSignalsJson = """
+            {
+              "signals": [
+                {"id":"s_ans","type":"answer","callId":"c_500","callerId":"u_avinash","senderId":"u_sandeep","receiverId":"u_avinash","sdp":"v=0\r\nans"},
+                {"id":"s_ice","type":"ice","callId":"c_500","caller_id":"u_avinash","sender_id":"u_sandeep","candidate":"candidate:1 1 UDP 1 10.0.0.2 50001 typ host","sdpMid":"0","sdpMLineIndex":0},
+                {"id":"s_dec","type":"decline","callId":"c_501","callerId":"u_avinash","senderId":"u_sandeep","receiverId":"u_avinash"}
+              ]
+            }
+        """.trimIndent()
+        val parsed = com.example.data.remote.BackendJsonParsers.parseCallSignalsFromBody(mixedSignalsJson)
+        assertEquals(3, parsed.size)
+        assertEquals("answer", parsed[0].type)
+        assertEquals("u_sandeep", parsed[0].senderId)
+        assertEquals("ice", parsed[1].type)
+        assertEquals("u_sandeep", parsed[1].senderId)
+        assertEquals("decline", parsed[2].type)
+        assertEquals("u_sandeep", parsed[2].senderId)
+
+        val activeOfferJson = """
+            {"activeCall":{"callId":"c_502","status":"ringing","callerId":"u_avinash","callerName":"Avinash","receiverId":"u_sandeep","callType":"video","sdp":"v=0\r\noffer_active"}}
+        """.trimIndent()
+        val activeSignals = com.example.data.remote.BackendJsonParsers.parseCallSignalsFromBody(activeOfferJson)
+        assertEquals(1, activeSignals.size)
+        assertEquals("offer", activeSignals[0].type)
+        assertEquals("u_avinash", activeSignals[0].senderId)
+        assertEquals("v=0\r\noffer_active", activeSignals[0].sdp)
+    }
+
+    @Test
+    fun `parseIceServersFromBody parses single string urls, array urls, snake_case wrapper, and TURN credentials`() {
+        val json = """
+            {
+              "ice_servers": [
+                {"urls":"stun:stun.l.google.com:19302"},
+                {"urls":["turn:relay.example.com:3478?transport=udp","turns:relay.example.com:5349"],"username":"u1","credential":"secret1"}
+              ]
+            }
+        """.trimIndent()
+        val servers = com.example.data.remote.BackendJsonParsers.parseIceServersFromBody(json)
+        assertEquals(2, servers.size)
+        assertEquals(listOf("stun:stun.l.google.com:19302"), servers[0].urls)
+        assertEquals(null, servers[0].username)
+        assertEquals(2, servers[1].urls.size)
+        assertEquals("u1", servers[1].username)
+        assertEquals("secret1", servers[1].credential)
+    }
 }

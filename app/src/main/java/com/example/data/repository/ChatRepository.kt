@@ -1692,7 +1692,7 @@ class ChatRepository(
         return@withContext try {
             val response = apiService.getIceServers()
             if (response.isSuccessful) {
-                response.body()?.iceServers.orEmpty()
+                BackendJsonParsers.parseIceServersFromBody(response.body()?.string())
             } else {
                 emptyList()
             }

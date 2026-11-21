@@ -65,6 +65,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var attachedLocalRenderer: SurfaceViewRenderer? = null
     private var attachedRemoteRenderer: SurfaceViewRenderer? = null
     private var timerJob: Job? = null
+    private var connectTimeoutJob: Job? = null
+    private var disconnectGraceJob: Job? = null
 
     init {
         observeCallSignaling()
@@ -150,15 +152,25 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     is SignalingEvent.CallAnswerReceived -> {
                         val current = _callState.value
                         val matchesCall = event.callId.isBlank() || activeCallId.isBlank() || event.callId == activeCallId
-                        if (current is CallState.OutgoingRinging &&
+                        val matchesPeer = event.callerId.isBlank() || event.callerId.equals(current.let {
+                            when (it) {
+                                is CallState.OutgoingRinging -> it.peerId
+                                is CallState.Connecting -> it.peerId
+                                else -> activePeerId
+                            }
+                        }, ignoreCase = true)
+                        if ((current is CallState.OutgoingRinging || current is CallState.Connecting) &&
                             matchesCall &&
-                            event.callerId.equals(current.peerId, ignoreCase = true)
+                            matchesPeer
                         ) {
                             NotificationHelper.stopOutgoingRingback()
+                            val peerId = if (current is CallState.OutgoingRinging) current.peerId else activePeerId
+                            val peerName = if (current is CallState.OutgoingRinging) current.peerName else activePeerName
+                            val isVid = if (current is CallState.OutgoingRinging) current.isVideo else activeIsVideo
+                            transitionToConnecting(peerId, peerName, isVid)
                             webRTCClient?.handleRemoteAnswer(event.sdp)
                             drainPendingIce()
                             syncRenderersToClient()
-                            transitionToConnected(current.peerId, current.peerName, current.isVideo)
                         }
                     }
                     is SignalingEvent.IceCandidateReceived -> {
@@ -248,8 +260,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             _hasRemoteVideo.value = false
             repository.setFastCallPolling(true)
 
-            // Transition immediately and open camera preview right away
-            transitionToConnected(incoming.callerId, incoming.callerName, incoming.isVideo)
+            // Transition to Connecting (NOT Connected) until WebRTC ICE actually establishes
+            transitionToConnecting(incoming.callerId, incoming.callerName, incoming.isVideo)
 
             val client = ensureWebRtcClient()
             client.prepareLocalMedia(isVideo = incoming.isVideo)
@@ -258,7 +270,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             startActiveCallForegroundService(incoming.callerName, incoming.isVideo)
 
             val iceServers = withTimeoutOrNull(2_500L) { repository.fetchIceServers() }.orEmpty()
-            if (_callState.value !is CallState.Connected) return@launch
+            if (_callState.value !is CallState.Connecting) return@launch
             client.startPeerConnection(isVideo = incoming.isVideo, customIceServers = iceServers)
             syncRenderersToClient()
             client.handleRemoteOfferAndCreateAnswer(incoming.offerSdp, incoming.isVideo)
@@ -331,6 +343,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         NotificationHelper.stopRingtoneAndVibrate(app)
         timerJob?.cancel()
         timerJob = null
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
+        disconnectGraceJob?.cancel()
+        disconnectGraceJob = null
         _callDurationSeconds.value = 0L
         _hasRemoteVideo.value = false
         _isFrontCamera.value = true
@@ -491,13 +507,54 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 }
             },
             onConnectionStateChanged = { iceState ->
-                if (iceState == PeerConnection.IceConnectionState.CONNECTED) {
-                    syncRenderersToClient()
-                    transitionToConnected(activePeerId, activePeerName, activeIsVideo)
-                } else if (iceState == PeerConnection.IceConnectionState.FAILED ||
-                    iceState == PeerConnection.IceConnectionState.DISCONNECTED
-                ) {
-                    endCallLocally(sendSignal = false, reason = "Connection lost")
+                when (iceState) {
+                    PeerConnection.IceConnectionState.CONNECTED,
+                    PeerConnection.IceConnectionState.COMPLETED -> {
+                        disconnectGraceJob?.cancel()
+                        disconnectGraceJob = null
+                        connectTimeoutJob?.cancel()
+                        connectTimeoutJob = null
+                        syncRenderersToClient()
+                        if (activePeerId.isNotBlank()) {
+                            transitionToConnected(activePeerId, activePeerName, activeIsVideo)
+                        }
+                    }
+                    PeerConnection.IceConnectionState.FAILED,
+                    PeerConnection.IceConnectionState.CLOSED -> {
+                        if (_callState.value !is CallState.Idle && _callState.value !is CallState.Ended) {
+                            endCallLocally(sendSignal = false, reason = "Connection failed")
+                        }
+                    }
+                    PeerConnection.IceConnectionState.DISCONNECTED -> {
+                        disconnectGraceJob?.cancel()
+                        disconnectGraceJob = viewModelScope.launch {
+                            delay(6_000L)
+                            if (_callState.value is CallState.Connected || _callState.value is CallState.Connecting) {
+                                endCallLocally(sendSignal = false, reason = "Connection lost")
+                            }
+                        }
+                    }
+                    else -> Unit
+                }
+            },
+            onPeerConnectionStateChanged = { pcState ->
+                when (pcState) {
+                    PeerConnection.PeerConnectionState.CONNECTED -> {
+                        disconnectGraceJob?.cancel()
+                        disconnectGraceJob = null
+                        connectTimeoutJob?.cancel()
+                        connectTimeoutJob = null
+                        syncRenderersToClient()
+                        if (activePeerId.isNotBlank()) {
+                            transitionToConnected(activePeerId, activePeerName, activeIsVideo)
+                        }
+                    }
+                    PeerConnection.PeerConnectionState.FAILED -> {
+                        if (_callState.value !is CallState.Idle && _callState.value !is CallState.Ended) {
+                            endCallLocally(sendSignal = false, reason = "Connection failed")
+                        }
+                    }
+                    else -> Unit
                 }
             },
             onRemoteVideoTrack = {
@@ -520,10 +577,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun transitionToConnecting(peerId: String, peerName: String, isVideo: Boolean) {
+        NotificationHelper.stopOutgoingRingback()
+        if (_callState.value is CallState.Connected || _callState.value is CallState.Connecting) return
+        _callState.value = CallState.Connecting(peerId, peerName, isVideo)
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = viewModelScope.launch {
+            delay(25_000L)
+            if (_callState.value is CallState.Connecting) {
+                endCallLocally(sendSignal = true, reason = "Connection timed out")
+            }
+        }
+    }
+
     private fun transitionToConnected(peerId: String, peerName: String, isVideo: Boolean) {
         NotificationHelper.stopOutgoingRingback()
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
         if (_callState.value is CallState.Connected) return
         _callState.value = CallState.Connected(peerId, peerName, isVideo)
+        webRTCClient?.setSpeakerphoneOn(_isSpeakerOn.value)
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
             _callDurationSeconds.value = 0L

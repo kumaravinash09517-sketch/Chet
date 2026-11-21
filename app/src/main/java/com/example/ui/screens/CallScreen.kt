@@ -108,6 +108,7 @@ fun CallScreen(
     val isVideoCall = when (callState) {
         is CallState.OutgoingRinging -> callState.isVideo
         is CallState.IncomingRinging -> callState.isVideo
+        is CallState.Connecting -> callState.isVideo
         is CallState.Connected -> callState.isVideo
         else -> false
     }
@@ -116,8 +117,10 @@ fun CallScreen(
 
     val showRemoteVideo = isVideoCall && callState is CallState.Connected && hasRemoteVideo
     val showLocalPreview = isVideoCall && isVideoEnabled && (
-        callState is CallState.OutgoingRinging || callState is CallState.Connected
-    )
+        callState is CallState.OutgoingRinging ||
+            callState is CallState.Connecting ||
+            callState is CallState.Connected
+        )
 
     val callPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -140,7 +143,11 @@ fun CallScreen(
 
     // Request CAMERA / RECORD_AUDIO automatically if an active video call lacks runtime permissions
     LaunchedEffect(isVideoCall, callState) {
-        if (isVideoCall && (callState is CallState.OutgoingRinging || callState is CallState.Connected)) {
+        if (isVideoCall &&
+            (callState is CallState.OutgoingRinging ||
+                callState is CallState.Connecting ||
+                callState is CallState.Connected)
+        ) {
             val missing = buildList {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     add(Manifest.permission.RECORD_AUDIO)
@@ -160,6 +167,7 @@ fun CallScreen(
     val peerName = when (callState) {
         is CallState.OutgoingRinging -> callState.peerName
         is CallState.IncomingRinging -> callState.callerName
+        is CallState.Connecting -> callState.peerName
         is CallState.Connected -> callState.peerName
         else -> "Hello Sir Call"
     }
@@ -171,6 +179,7 @@ fun CallScreen(
             else -> "Calling…"
         }
         is CallState.IncomingRinging -> if (callState.isVideo) "Incoming Video Call" else "Incoming Voice Call"
+        is CallState.Connecting -> "Connecting…"
         is CallState.Connected -> formatDuration(durationSeconds)
         is CallState.Ended -> callState.reason
         CallState.Idle -> ""
@@ -184,6 +193,12 @@ fun CallScreen(
         }
         onDispose {
             onAttachRenderers(null, null)
+        }
+    }
+
+    LaunchedEffect(showLocalPreview, showRemoteVideo) {
+        if (isVideoCall && isActiveCall) {
+            onAttachRenderers(localView, remoteView)
         }
     }
 
@@ -203,20 +218,24 @@ fun CallScreen(
                 )
             )
     ) {
-        // Remote Video Surface (full-screen background when connected & video received)
-        if (showRemoteVideo) {
+        // Keep remoteView mounted throughout any active video call so SurfaceHolder exists before remote frames arrive
+        if (isVideoCall && isActiveCall) {
             AndroidView(
-                factory = { remoteView },
+                factory = {
+                    remoteView.apply {
+                        setZOrderMediaOverlay(false)
+                    }
+                },
                 update = { view ->
                     view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                    view.visibility = if (showRemoteVideo) View.VISIBLE else View.INVISIBLE
                 },
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         // Local Self-Camera Preview:
-        // Full-screen while dialing / waiting for remote video, then top-right PiP once remote video arrives.
-        // Uses native ViewOutlineProvider instead of Compose Surface/graphicsLayer so SurfaceView hole-punch renders cleanly.
+        // Single persistent AndroidView transitions smoothly from full-screen preview to top-right PiP without tearing down SurfaceView.
         if (showLocalPreview) {
             val isPipMode = showRemoteVideo
             val localContainerModifier = if (isPipMode) {
@@ -235,8 +254,13 @@ fun CallScreen(
 
             Box(modifier = localContainerModifier) {
                 AndroidView(
-                    factory = { localView },
+                    factory = {
+                        localView.apply {
+                            setZOrderMediaOverlay(true)
+                        }
+                    },
                     update = { view ->
+                        view.setZOrderMediaOverlay(true)
                         view.setMirror(isFrontCamera)
                         view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                         if (isPipMode) {

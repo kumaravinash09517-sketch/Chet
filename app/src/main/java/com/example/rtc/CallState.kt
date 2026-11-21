@@ -17,6 +17,12 @@ sealed interface CallState {
         val offerSdp: String
     ) : CallState
 
+    data class Connecting(
+        val peerId: String,
+        val peerName: String,
+        val isVideo: Boolean
+    ) : CallState
+
     data class Connected(
         val peerId: String,
         val peerName: String,

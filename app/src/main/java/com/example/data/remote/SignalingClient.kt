@@ -302,7 +302,7 @@ class SignalingClient(
                     }
                 }
                 "ringing", "call_ringing" -> {
-                    val peerId = firstNonBlank(data, "senderId", "sender_id", "receiverId", "callerId", "from").orEmpty()
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "receiverId", "callerId").orEmpty()
                     val callId = firstNonBlank(data, "callId", "call_id").orEmpty()
                     _events.tryEmit(SignalingEvent.CallRinging(callId = callId, peerId = peerId))
                 }
@@ -317,7 +317,7 @@ class SignalingClient(
                             )
                         )
                     } else {
-                        val peerId = firstNonBlank(data, "senderId", "sender_id", "callerId", "caller_id", "peerId", "from")
+                        val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "calleeId", "callee_id", "peerId", "callerId")
                         val sdp = data.optString("sdp")
                         if (!peerId.isNullOrBlank() && sdp.isNotBlank()) {
                             _events.tryEmit(
@@ -359,7 +359,7 @@ class SignalingClient(
                     }
                 }
                 "call_end", "call_reject", "hangup", "call_hangup", "decline", "call_decline", "end", "reject" -> {
-                    val peerId = firstNonBlank(data, "senderId", "sender_id", "peerId", "callerId", "from").orEmpty()
+                    val peerId = firstNonBlank(data, "senderId", "sender_id", "from", "peerId", "callerId").orEmpty()
                     val callId = firstNonBlank(data, "callId", "call_id").orEmpty()
                     _events.tryEmit(
                         SignalingEvent.CallEnded(
