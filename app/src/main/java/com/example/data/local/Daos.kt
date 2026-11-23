@@ -31,6 +31,9 @@ interface UserDao {
 
     @Query("UPDATE users SET isOnline = :isOnline WHERE userId = :userId")
     suspend fun updateOnlineStatus(userId: String, isOnline: Boolean)
+
+    @Query("UPDATE users SET isOnline = 0")
+    suspend fun clearAllOnlineStatuses()
 }
 
 @Dao
@@ -65,6 +68,12 @@ interface ConversationDao {
             "WHERE peerId = :peerId AND lastMessageId = :messageId"
     )
     suspend fun updateLastMessageStatus(peerId: String, messageId: String, status: MessageStatus)
+
+    @Query(
+        "UPDATE conversations SET lastMessageStatus = 'READ' " +
+            "WHERE peerId = :peerId AND lastMessageIsMine = 1"
+    )
+    suspend fun markLastMessageReadIfMine(peerId: String)
 
     @Query("DELETE FROM conversations")
     suspend fun clearAll()
@@ -118,6 +127,9 @@ interface MessageDao {
         myUserId: String,
         status: MessageStatus = MessageStatus.READ
     )
+
+    @Query("UPDATE messages SET localUri = :localUri WHERE id = :messageId")
+    suspend fun updateLocalUri(messageId: String, localUri: String)
 
     @Query(
         "UPDATE messages SET latitude = :latitude, longitude = :longitude, liveLocationActive = :active " +

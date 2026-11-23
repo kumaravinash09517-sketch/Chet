@@ -103,10 +103,57 @@ class SignalingClient(
     private val shouldStayConnected = AtomicBoolean(false)
     private var reconnectAttempt = 0
 
+    @Volatile
+    var isAppInForeground: Boolean = false
+        private set
+
+    fun setAppForeground(inForeground: Boolean) {
+        val changed = isAppInForeground != inForeground
+        isAppInForeground = inForeground
+        if (_isConnected.value && changed) {
+            scope.launch {
+                val session = sessionManager.getCurrentSession() ?: return@launch
+                sendPresenceFrame(session.userId, inForeground)
+            }
+        }
+    }
+
+    private fun sendPresenceFrame(userId: String, online: Boolean) {
+        sendRaw(
+            JSONObject().apply {
+                put("type", "presence")
+                put("userId", userId)
+                put("isOnline", online)
+                put("is_online", online)
+                put("online", online)
+                put("status", if (online) "online" else "offline")
+                put("timestamp", System.currentTimeMillis())
+            }
+        )
+    }
+
     fun connect() {
         shouldStayConnected.set(true)
         if (_isConnected.value && webSocket != null) return
         openSocket()
+    }
+
+    suspend fun sendPresenceAndDisconnect(userId: String) {
+        isAppInForeground = false
+        if (userId.isNotBlank()) {
+            sendPresenceFrame(userId, false)
+            sendRaw(
+                JSONObject().apply {
+                    put("type", "logout")
+                    put("userId", userId)
+                    put("user_id", userId)
+                    put("isOnline", false)
+                    put("status", "offline")
+                }
+            )
+            delay(80L)
+        }
+        disconnect()
     }
 
     fun disconnect() {
@@ -138,14 +185,18 @@ class SignalingClient(
                     _isConnected.value = true
                     reconnectAttempt = 0
                     GlobalSecurityEventBus.updateServerStatus(ServerStatus.READY)
+                    val onlineNow = isAppInForeground
                     sendRaw(
                         JSONObject().apply {
                             put("type", "auth")
                             put("userId", session.userId)
                             put("displayName", session.displayName)
                             put("deviceLockId", session.deviceLockId)
+                            put("isOnline", onlineNow)
+                            put("status", if (onlineNow) "online" else "offline")
                         }
                     )
+                    sendPresenceFrame(session.userId, onlineNow)
                     _events.tryEmit(SignalingEvent.SocketConnected)
                     startHeartbeat(session.userId)
                 }
@@ -184,10 +235,13 @@ class SignalingClient(
         heartbeatJob = scope.launch {
             while (shouldStayConnected.get() && _isConnected.value) {
                 delay(20_000L)
+                val onlineNow = isAppInForeground
                 sendRaw(
                     JSONObject().apply {
                         put("type", "ping")
                         put("userId", userId)
+                        put("isOnline", onlineNow)
+                        put("status", if (onlineNow) "online" else "offline")
                         put("timestamp", System.currentTimeMillis())
                     }
                 )
@@ -241,14 +295,28 @@ class SignalingClient(
                         _events.tryEmit(SignalingEvent.MessageDeleted(messageId, convId))
                     }
                 }
-                "receipt", "read_receipt", "delivered_receipt" -> {
-                    val messageId = data.optString("messageId", data.optString("message_id"))
-                        .takeIf { it.isNotBlank() && it != "null" }
-                    val convId = data.optString(
+                "receipt", "read_receipt", "delivered_receipt", "seen" -> {
+                    val messageId = firstNonBlank(data, "messageId", "message_id", "msgId", "msg_id")
+                        ?: firstNonBlank(json, "messageId", "message_id")
+                    val convId = firstNonBlank(
+                        data,
                         "peerId",
-                        data.optString("senderId", data.optString("sender_id"))
-                    )
-                    val status = data.optString("status", "READ")
+                        "peer_id",
+                        "senderId",
+                        "sender_id",
+                        "from",
+                        "readerId",
+                        "reader_id",
+                        "userId",
+                        "user_id"
+                    ) ?: firstNonBlank(json, "peerId", "senderId", "sender_id", "from") ?: ""
+                    val defaultStatus = when (rawEventType.trim().lowercase()) {
+                        "delivered_receipt" -> "DELIVERED"
+                        else -> "READ"
+                    }
+                    val rawStatus = (firstNonBlank(data, "status") ?: firstNonBlank(json, "status") ?: defaultStatus)
+                        .uppercase()
+                    val status = if (rawStatus == "SEEN") "READ" else rawStatus
                     if (convId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.ReceiptUpdated(messageId, convId, status))
                     }
@@ -263,9 +331,22 @@ class SignalingClient(
                         _events.tryEmit(SignalingEvent.TypingStatusChanged(userId, isTyping))
                     }
                 }
-                "presence" -> {
-                    val userId = data.optString("userId", data.optString("user_id"))
-                    val online = data.optBoolean("isOnline", data.optBoolean("is_online", false))
+                "presence", "user_online", "user_offline", "user_disconnected" -> {
+                    val eventKey = rawEventType.trim().lowercase()
+                    val userId = firstNonBlank(data, "userId", "user_id", "id")
+                        ?: firstNonBlank(json, "userId", "user_id", "id")
+                        ?: ""
+                    val statusStr = firstNonBlank(data, "status", "presence", "state")?.lowercase()
+                    val online = when {
+                        eventKey == "user_offline" || eventKey == "user_disconnected" -> false
+                        eventKey == "user_online" -> true
+                        statusStr in setOf("offline", "disconnected", "logged_out", "inactive") -> false
+                        data.has("isOnline") && !data.isNull("isOnline") -> data.optBoolean("isOnline", false)
+                        data.has("is_online") && !data.isNull("is_online") -> data.optBoolean("is_online", false)
+                        data.has("online") && !data.isNull("online") -> data.optBoolean("online", false)
+                        statusStr in setOf("online", "active", "connected") -> true
+                        else -> false
+                    }
                     if (userId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.PresenceChanged(userId, online))
                     }

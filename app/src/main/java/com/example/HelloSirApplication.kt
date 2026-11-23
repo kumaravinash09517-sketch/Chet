@@ -31,7 +31,7 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
         private set
 
     @Volatile
-    var isUiInForeground: Boolean = true
+    var isUiInForeground: Boolean = false
 
     @Volatile
     var activeChatPeerId: String? = null
@@ -45,6 +45,7 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
 
         val moshi = NetworkModule.provideMoshi()
         val okHttpClient = NetworkModule.provideOkHttpClient(sessionManager)
+        val mediaHttpClient = NetworkModule.provideImageOkHttpClient(sessionManager)
         val apiService = NetworkModule.provideApiService(okHttpClient, moshi)
 
         signalingClient = SignalingClient(okHttpClient, sessionManager)
@@ -53,7 +54,8 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
             database = database,
             apiService = apiService,
             signalingClient = signalingClient,
-            sessionManager = sessionManager
+            sessionManager = sessionManager,
+            mediaHttpClient = mediaHttpClient
         )
         contactSyncHelper = ContactSyncHelper(this)
         locationHelper = LocationHelper(this)

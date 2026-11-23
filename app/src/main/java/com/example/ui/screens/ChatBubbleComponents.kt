@@ -44,6 +44,7 @@ import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -77,6 +78,7 @@ import kotlinx.coroutines.withContext
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
 import com.example.data.remote.BackendJsonParsers
+import com.example.data.repository.MediaTransferProgress
 import com.example.ui.theme.IncomingBubbleDark
 import com.example.ui.theme.IncomingBubbleLight
 import com.example.ui.theme.OnlineGreen
@@ -90,9 +92,11 @@ import java.util.Locale
 fun ChatMessageBubble(
     message: MessageEntity,
     isMine: Boolean,
+    transferProgress: MediaTransferProgress? = null,
     onLongPressDelete: (MessageEntity) -> Unit,
     onImagePreview: (String) -> Unit,
     onVideoPreview: (String) -> Unit = {},
+    onEnsureVideoDownloaded: (MessageEntity) -> Unit = {},
     onStopLiveLocation: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -236,12 +240,18 @@ fun ChatMessageBubble(
                     }
                     MessageType.VIDEO -> {
                         VideoPreviewCard(
+                            messageId = message.id,
+                            isMine = isMine,
                             title = message.fileName ?: "Video Clip",
                             subtitle = formatBytes(message.fileSizeBytes),
                             sourceUri = resolvedMediaSource,
+                            localUri = message.localUri,
+                            remoteUrl = message.mediaUrl,
                             caption = message.content,
+                            transferProgress = transferProgress,
                             contentColor = contentColor,
                             mutedColor = mutedColor,
+                            onEnsureDownloaded = { onEnsureVideoDownloaded(message) },
                             onPlay = { src -> onVideoPreview(src) }
                         )
                     }
@@ -338,233 +348,240 @@ private object VideoThumbnailCache {
 
 @Composable
 private fun VideoPreviewCard(
+    messageId: String,
+    isMine: Boolean,
     title: String,
     subtitle: String,
     sourceUri: String?,
+    localUri: String?,
+    remoteUrl: String?,
     caption: String,
+    transferProgress: MediaTransferProgress?,
     contentColor: Color,
     mutedColor: Color,
+    onEnsureDownloaded: () -> Unit,
     onPlay: (String) -> Unit
 ) {
     val context = LocalContext.current
-    var thumbnail by remember(sourceUri) {
-        mutableStateOf(sourceUri?.let { VideoThumbnailCache.get(it) })
+    var thumbnail by remember(sourceUri, localUri) {
+        mutableStateOf(
+            localUri?.let { VideoThumbnailCache.get(it) }
+                ?: sourceUri?.let { VideoThumbnailCache.get(it) }
+        )
     }
-    var isPlayingInline by remember(sourceUri) { mutableStateOf(false) }
-    var isPausedInline by remember(sourceUri) { mutableStateOf(false) }
-    var isBuffering by remember(sourceUri) { mutableStateOf(false) }
-    var inlinePlaybackError by remember(sourceUri) { mutableStateOf(false) }
-    var inlineVideoViewRef by remember(sourceUri) { mutableStateOf<VideoView?>(null) }
+    var thumbnailFailed by remember(sourceUri, localUri) { mutableStateOf(false) }
 
-    LaunchedEffect(sourceUri) {
-        val uri = sourceUri ?: return@LaunchedEffect
-        if (thumbnail != null) return@LaunchedEffect
+    LaunchedEffect(messageId, localUri, remoteUrl, transferProgress == null) {
+        if (!isMine && localUri.isNullOrBlank() && !remoteUrl.isNullOrBlank() && transferProgress == null) {
+            onEnsureDownloaded()
+        }
+    }
+
+    LaunchedEffect(sourceUri, localUri) {
+        val candidateUris = listOfNotNull(
+            localUri?.takeIf { it.isNotBlank() },
+            sourceUri?.takeIf { it.isNotBlank() }
+        ).distinct()
+        if (candidateUris.isEmpty() || thumbnail != null) return@LaunchedEffect
+
         val loaded = withContext(Dispatchers.IO) {
-            val retriever = MediaMetadataRetriever()
-            try {
-                if (uri.startsWith("http://", ignoreCase = true) ||
-                    uri.startsWith("https://", ignoreCase = true)
-                ) {
-                    retriever.setDataSource(uri, emptyMap())
-                } else {
-                    retriever.setDataSource(context, Uri.parse(uri))
+            var frame: Bitmap? = null
+            for (candidate in candidateUris) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    if (candidate.startsWith("http://", ignoreCase = true) ||
+                        candidate.startsWith("https://", ignoreCase = true)
+                    ) {
+                        retriever.setDataSource(candidate, emptyMap())
+                    } else {
+                        retriever.setDataSource(context, Uri.parse(candidate))
+                    }
+                    frame = retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime()
+                    if (frame != null) break
+                } catch (_: Throwable) {
+                    // Try next candidate URI
+                } finally {
+                    runCatching { retriever.release() }
                 }
-                retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: retriever.getFrameAtTime()
-            } catch (_: Throwable) {
-                null
-            } finally {
-                runCatching { retriever.release() }
             }
+            frame
         }
         if (loaded != null) {
-            VideoThumbnailCache.put(uri, loaded)
+            candidateUris.forEach { VideoThumbnailCache.put(it, loaded) }
             thumbnail = loaded
+            thumbnailFailed = false
+        } else {
+            thumbnailFailed = true
         }
     }
 
-    DisposableEffect(sourceUri) {
-        onDispose {
-            runCatching { inlineVideoViewRef?.stopPlayback() }
-            inlineVideoViewRef = null
-        }
-    }
+    val isTransferring = transferProgress != null
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
             shape = RoundedCornerShape(12.dp),
-            color = Color.Black.copy(alpha = 0.85f),
+            color = Color(0xFF152520),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(180.dp)
+                .height(186.dp)
                 .clip(RoundedCornerShape(12.dp))
+                .testTag("video_preview_card_$messageId")
                 .clickable(enabled = sourceUri != null) {
-                    if (sourceUri == null) return@clickable
-                    if (!isPlayingInline || inlinePlaybackError) {
-                        inlinePlaybackError = false
-                        isPausedInline = false
-                        isBuffering = true
-                        isPlayingInline = true
-                    } else {
-                        val vv = inlineVideoViewRef
-                        if (vv != null) {
-                            if (isPausedInline) {
-                                runCatching { vv.start() }
-                                isPausedInline = false
-                            } else {
-                                runCatching { vv.pause() }
-                                isPausedInline = true
-                            }
+                    if (sourceUri != null) {
+                        if (!isMine && localUri.isNullOrBlank() && !remoteUrl.isNullOrBlank() && !isTransferring) {
+                            onEnsureDownloaded()
                         }
+                        onPlay(sourceUri)
                     }
                 }
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (isPlayingInline && sourceUri != null && !inlinePlaybackError) {
-                    AndroidView(
-                        factory = { ctx ->
-                            VideoView(ctx).apply {
-                                setVideoURI(Uri.parse(sourceUri))
-                                setOnPreparedListener { mp ->
-                                    isBuffering = false
-                                    mp.isLooping = false
-                                    if (!isPausedInline) {
-                                        start()
-                                    }
-                                }
-                                setOnCompletionListener {
-                                    isPlayingInline = false
-                                    isPausedInline = false
-                                    isBuffering = false
-                                }
-                                setOnErrorListener { _, _, _ ->
-                                    isBuffering = false
-                                    isPlayingInline = false
-                                    inlinePlaybackError = true
-                                    true
-                                }
-                            }.also { inlineVideoViewRef = it }
-                        },
-                        update = { view ->
-                            inlineVideoViewRef = view
-                        },
+                val bmp = thumbnail
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = title,
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.28f))
+                    )
                 } else {
-                    val bmp = thumbnail
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = title,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.34f))
+                    // Clear visual video tile placeholder while thumbnail loads/downloads (never a flat dead black box)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 26.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Videocam,
+                            contentDescription = "Video clip",
+                            tint = Color.White.copy(alpha = 0.72f),
+                            modifier = Modifier.size(34.dp)
                         )
                     }
                 }
 
-                if (isBuffering && isPlayingInline) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.5.dp,
-                        modifier = Modifier.size(34.dp)
-                    )
-                } else if (!isPlayingInline || isPausedInline || inlinePlaybackError) {
+                // Center Play / Transfer Progress Badge
+                if (isTransferring) {
+                    val progress = transferProgress!!
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color.Black.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .padding(horizontal = 14.dp)
+                            .testTag("video_transfer_progress_$messageId")
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (progress.totalBytes > 0L) {
+                                    CircularProgressIndicator(
+                                        progress = { progress.fraction },
+                                        color = Color.White,
+                                        trackColor = Color.White.copy(alpha = 0.25f),
+                                        strokeWidth = 3.dp,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                } else {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 3.dp,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                Text(
+                                    text = progress.statusLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (progress.totalBytes > 0L) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                LinearProgressIndicator(
+                                    progress = { progress.fraction },
+                                    color = Color.White,
+                                    trackColor = Color.White.copy(alpha = 0.24f),
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.75f)
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(2.dp))
+                                )
+                            }
+                        }
+                    }
+                } else {
                     Surface(
                         shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.56f),
-                        modifier = Modifier.size(52.dp)
+                        color = Color.Black.copy(alpha = 0.58f),
+                        modifier = Modifier.size(56.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                imageVector = when {
-                                    sourceUri == null -> Icons.Rounded.Videocam
-                                    inlinePlaybackError -> Icons.Rounded.Refresh
-                                    else -> Icons.Rounded.PlayArrow
-                                },
-                                contentDescription = if (isPausedInline) "Resume video" else "Play video",
+                                imageVector = if (sourceUri == null) Icons.Rounded.Videocam else Icons.Rounded.PlayArrow,
+                                contentDescription = "Play video fullscreen",
                                 tint = Color.White,
-                                modifier = Modifier.size(30.dp)
+                                modifier = Modifier.size(32.dp)
                             )
                         }
                     }
                 }
 
-                if (isPlayingInline && !isPausedInline && !isBuffering) {
-                    Surface(
-                        shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.48f),
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(8.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val vv = inlineVideoViewRef
-                                if (vv != null) {
-                                    runCatching { vv.pause() }
-                                    isPausedInline = true
-                                }
-                            },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .testTag("inline_video_pause_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Pause,
-                                contentDescription = "Pause video",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth()
-                            .background(Color.Black.copy(alpha = 0.45f))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = when {
-                                sourceUri == null -> "Uploading video…"
-                                inlinePlaybackError -> "Tap to retry • Open fullscreen"
-                                else -> "$subtitle • Tap to play"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White.copy(alpha = 0.85f)
-                        )
-                    }
+                // Bottom metadata strip
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.52f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = when {
+                            isTransferring -> transferProgress!!.statusLabel
+                            sourceUri == null -> "Preparing video…"
+                            thumbnailFailed && localUri.isNullOrBlank() && !isMine -> "$subtitle • Tap to play / cache"
+                            else -> "$subtitle • Tap to play fullscreen"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.88f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
 
                 if (sourceUri != null) {
                     Surface(
                         shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.52f),
+                        color = Color.Black.copy(alpha = 0.54f),
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(6.dp)
                     ) {
                         IconButton(
-                            onClick = {
-                                runCatching { inlineVideoViewRef?.pause() }
-                                isPausedInline = true
-                                onPlay(sourceUri)
-                            },
+                            onClick = { onPlay(sourceUri) },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(38.dp)
                                 .testTag("video_fullscreen_button")
                         ) {
                             Icon(

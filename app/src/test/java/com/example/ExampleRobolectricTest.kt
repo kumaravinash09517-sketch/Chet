@@ -676,4 +676,116 @@ class ExampleRobolectricTest {
         assertTrue(direct is com.example.core.security.AuthCredentials.DirectUserId)
         assertTrue(google is com.example.core.security.AuthCredentials.GoogleIdToken)
     }
+
+    @Test
+    fun `backendJsonParsers handles presence offline status, SEEN to READ, and ISO-8601 timestamps`() {
+        val users = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """
+            {
+              "users": [
+                {"userId":"u_online","displayName":"OnlineUser","status":"online","isOnline":true},
+                {"userId":"u_offline_status","displayName":"OfflineByStatus","status":"offline","isOnline":true},
+                {"userId":"u_offline_flag","displayName":"OfflineByFlag","is_online":false}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(3, users.size)
+        assertTrue(users[0].resolvedIsOnline())
+        org.junit.Assert.assertFalse(users[1].resolvedIsOnline())
+        org.junit.Assert.assertFalse(users[2].resolvedIsOnline())
+
+        val msgs = com.example.data.remote.BackendJsonParsers.parseMessagesFromBody(
+            """
+            {
+              "messages": [
+                {"id":"m_seen","sender_id":"u_avinash","receiver_id":"u_sandeep","text":"Read me","status":"SEEN","createdAt":"2026-11-22T12:30:00Z"}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(1, msgs.size)
+        assertEquals("READ", msgs.first().status)
+        assertTrue(msgs.first().timestamp > 1_700_000_000_000L)
+
+        assertEquals(
+            "READ",
+            com.example.data.remote.BackendJsonParsers.parseSendMessageStatus("""{"message":{"status":"seen"}}""")
+        )
+    }
+
+    @Test
+    fun `unread incoming message moves conversation to top and markLastMessageReadIfMine updates status to READ`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val convDao = db.conversationDao()
+            val userDao = db.userDao()
+
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "u_first",
+                    peerName = "First",
+                    lastMessageId = "m1",
+                    lastMessagePreview = "Hello",
+                    lastMessageType = MessageType.TEXT,
+                    lastMessageTimestamp = 2000L,
+                    lastMessageStatus = MessageStatus.SENT,
+                    lastMessageIsMine = true,
+                    unreadCount = 0
+                )
+            )
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "u_second",
+                    peerName = "Second",
+                    lastMessageId = "m2",
+                    lastMessagePreview = "Older",
+                    lastMessageType = MessageType.TEXT,
+                    lastMessageTimestamp = 1000L,
+                    lastMessageStatus = MessageStatus.DELIVERED,
+                    lastMessageIsMine = false,
+                    unreadCount = 0
+                )
+            )
+            // Incoming newer unread message updates u_second and moves it to index 0
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "u_second",
+                    peerName = "Second",
+                    lastMessageId = "m3",
+                    lastMessagePreview = "New unread msg!",
+                    lastMessageType = MessageType.TEXT,
+                    lastMessageTimestamp = 5000L,
+                    lastMessageStatus = MessageStatus.DELIVERED,
+                    lastMessageIsMine = false,
+                    unreadCount = 2
+                )
+            )
+            val ordered = convDao.observeConversations().first()
+            assertEquals("u_second", ordered.first().peerId)
+            assertEquals(2, ordered.first().unreadCount)
+
+            convDao.markLastMessageReadIfMine("u_first")
+            assertEquals(MessageStatus.READ, convDao.getConversation("u_first")?.lastMessageStatus)
+
+            userDao.upsertUsers(
+                listOf(
+                    com.example.data.local.UserEntity(
+                        userId = "u_first",
+                        displayName = "First",
+                        isOnline = true,
+                        lastLoginMillis = 1000L,
+                        lastLoginFormatted = "now"
+                    )
+                )
+            )
+            userDao.clearAllOnlineStatuses()
+            org.junit.Assert.assertFalse(userDao.getUser("u_first")?.isOnline == true)
+        } finally {
+            db.close()
+        }
+    }
 }

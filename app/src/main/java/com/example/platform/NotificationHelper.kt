@@ -24,9 +24,12 @@ import com.example.R
 
 object NotificationHelper {
     const val CHANNEL_CALLS = "hello_sir_calls_v2"
-    const val CHANNEL_MESSAGES = "hello_sir_messages"
+    const val CHANNEL_MESSAGES = "hello_sir_messages_v2"
     const val CHANNEL_SYNC = "hello_sir_sync"
     const val CHANNEL_SHAYARI = "hello_sir_shayari"
+
+    fun messageNotificationIdFor(senderId: String): Int =
+        50_000 + (senderId.hashCode() and 0x7FFF)
 
     const val NOTIFICATION_SYNC_ID = 1001
     const val NOTIFICATION_CALL_ID = 2001
@@ -87,6 +90,16 @@ object NotificationHelper {
             ).apply {
                 description = "Real-time incoming messages with inline reply"
                 enableVibration(true)
+                enableLights(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                val defaultSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                setSound(
+                    defaultSound,
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
             }
 
             val shayariChannel = NotificationChannel(
@@ -242,7 +255,10 @@ object NotificationHelper {
         preview: String
     ) {
         if (!canPostNotifications(context)) return
+        createChannels(context)
 
+        val baseReqCode = 60_000 + ((senderId.hashCode() and 0x3FFF) shl 2)
+        val notifId = messageNotificationIdFor(senderId)
         val senderTitle = formatSenderTitle(senderName, senderId)
         val openChatIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -252,7 +268,7 @@ object NotificationHelper {
         }
         val openPending = PendingIntent.getActivity(
             context,
-            senderId.hashCode(),
+            baseReqCode + 1,
             openChatIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -268,7 +284,7 @@ object NotificationHelper {
         }
         val replyPending = PendingIntent.getBroadcast(
             context,
-            senderId.hashCode() + 1,
+            baseReqCode + 2,
             replyIntent,
             PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -286,13 +302,15 @@ object NotificationHelper {
             .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .setContentIntent(openPending)
             .addAction(replyAction)
             .build()
 
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.notify(senderId.hashCode(), notification)
+        manager?.notify(notifId, notification)
     }
 
     fun showDailyShayariNotification(context: Context, shayari: DailyShayari) {

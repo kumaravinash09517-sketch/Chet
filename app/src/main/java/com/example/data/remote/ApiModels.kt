@@ -922,7 +922,16 @@ object BackendJsonParsers {
             "loginDateFormatted",
             "login_date_formatted"
         )
-        val isOnline = obj.optBoolean("isOnline", obj.optBoolean("is_online", false))
+        val rawStatus = firstNonBlankString(obj, "status", "presence", "presenceStatus", "presence_status")
+            ?.lowercase()
+        val isOnline = when {
+            rawStatus in setOf("offline", "disconnected", "logged_out", "inactive", "away") -> false
+            obj.has("isOnline") && !obj.isNull("isOnline") -> obj.optBoolean("isOnline", false)
+            obj.has("is_online") && !obj.isNull("is_online") -> obj.optBoolean("is_online", false)
+            obj.has("online") && !obj.isNull("online") -> obj.optBoolean("online", false)
+            rawStatus in setOf("online", "active", "connected") -> true
+            else -> false
+        }
         val isBlocked = obj.optBoolean("isBlocked", obj.optBoolean("is_blocked", false))
         val deviceId = firstNonBlankString(obj, "device_id", "deviceId", "deviceLockId")
         return RemoteUserDto(
@@ -1061,7 +1070,8 @@ object BackendJsonParsers {
             liveLocationActive = liveLocationActive
         )
 
-        val status = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
+        val rawStatus = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
+        val status = if (rawStatus == "SEEN") "READ" else rawStatus
 
         return RemoteMessageDto(
             id = id,
@@ -1125,9 +1135,13 @@ object BackendJsonParsers {
         return runCatching {
             val obj = org.json.JSONObject(trimmed)
             val nested = obj.optJSONObject("message") ?: obj.optJSONObject("data")
-            val status = firstNonBlankString(obj, "status")
+            val rawStatus = firstNonBlankString(obj, "status")
                 ?: nested?.let { firstNonBlankString(it, "status") }
-            status?.uppercase()?.takeIf { it in setOf("SENT", "DELIVERED", "READ") }
+            val normalized = when (rawStatus?.uppercase()) {
+                "SEEN" -> "READ"
+                else -> rawStatus?.uppercase()
+            }
+            normalized?.takeIf { it in setOf("SENT", "DELIVERED", "READ") }
         }.getOrNull()
     }
 
@@ -1170,7 +1184,30 @@ object BackendJsonParsers {
                 rawStr.toLongOrNull()?.let { parsed ->
                     if (parsed > 0L) return if (parsed < 10_000_000_000L) parsed * 1000L else parsed
                 }
+                parseIso8601Millis(rawStr)?.let { parsedIso ->
+                    if (parsedIso > 0L) return parsedIso
+                }
             }
+        }
+        return null
+    }
+
+    private fun parseIso8601Millis(raw: String): Long? {
+        val cleaned = raw.trim()
+        val formats = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd HH:mm:ss"
+        )
+        for (pattern in formats) {
+            val parsed = runCatching {
+                java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.parse(cleaned)?.time
+            }.getOrNull()
+            if (parsed != null && parsed > 0L) return parsed
         }
         return null
     }

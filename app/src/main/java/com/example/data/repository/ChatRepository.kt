@@ -1,9 +1,11 @@
 package com.example.data.repository
 
+import android.app.NotificationManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import com.example.HelloSirApplication
 import com.example.core.security.AuthCredentials
 import com.example.core.security.AuthGateway
 import com.example.core.security.GlobalSecurityEventBus
@@ -23,6 +25,7 @@ import com.example.data.remote.BackendJsonParsers
 import com.example.data.remote.CallSignalRequest
 import com.example.data.remote.DirectLoginRequest
 import com.example.data.remote.IceServerDto
+import com.example.data.remote.NetworkModule
 import com.example.data.remote.RegisterUserRequest
 import com.example.data.remote.RemoteCallSignalDto
 import com.example.data.remote.RemoteMessageDto
@@ -34,23 +37,34 @@ import com.example.data.remote.SignalingClient
 import com.example.data.remote.SignalingEvent
 import com.example.data.remote.VerifyOtpRequest
 import com.example.data.remote.VerifyOtpResponse
+import com.example.platform.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
+import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -319,7 +333,8 @@ class ChatRepository(
     private val database: AppDatabase,
     private val apiService: ApiService,
     private val signalingClient: SignalingClient,
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    private val mediaHttpClient: OkHttpClient = NetworkModule.provideImageOkHttpClient(sessionManager)
 ) : AuthGateway {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val userDao = database.userDao()
@@ -327,6 +342,7 @@ class ChatRepository(
     private val messageDao = database.messageDao()
 
     private var callPollingJob: Job? = null
+    private var directoryRefreshJob: Job? = null
 
     @Volatile
     private var fastCallPolling: Boolean = false
@@ -334,18 +350,34 @@ class ChatRepository(
     @Volatile
     private var cachedIceServers: List<IceServerDto> = emptyList()
 
+    private val notifiedMessageIds: MutableSet<String> = Collections.synchronizedSet(LinkedHashSet())
+    private val activeVideoDownloads: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
     val sessionFlow: Flow<UserSession?> = sessionManager.sessionFlow
     val conversationsFlow: Flow<List<ConversationEntity>> = conversationDao.observeConversations()
     val usersFlow: Flow<List<UserEntity>> = userDao.observeAllUsers()
     val totalUnreadCountFlow: Flow<Int?> = conversationDao.observeTotalUnreadCount()
+    val mediaTransferProgress: StateFlow<Map<String, MediaTransferProgress>> = MediaTransferTracker.transfers
 
     init {
+        scope.launch {
+            userDao.clearAllOnlineStatuses()
+        }
         observeSignalingEvents()
         observeSessionForCallPolling()
     }
 
     fun observeMessages(peerId: String): Flow<List<MessageEntity>> =
         messageDao.observeMessages(peerId)
+
+    fun observeUser(userId: String): Flow<UserEntity?> =
+        userDao.observeAllUsers().let { flow ->
+            kotlinx.coroutines.flow.flow {
+                flow.collect { users ->
+                    emit(users.firstOrNull { it.userId.equals(userId, ignoreCase = true) })
+                }
+            }
+        }
 
     fun setFastCallPolling(active: Boolean) {
         fastCallPolling = active
@@ -369,10 +401,36 @@ class ChatRepository(
                 .distinctUntilChangedBy { it?.userId }
                 .collect { session ->
                     callPollingJob?.cancel()
+                    directoryRefreshJob?.cancel()
                     if (session != null) {
                         startCallPollingLoop()
+                        startDirectoryAndConversationRefreshLoop()
                     }
                 }
+        }
+    }
+
+    private fun startDirectoryAndConversationRefreshLoop() {
+        directoryRefreshJob?.cancel()
+        directoryRefreshJob = scope.launch {
+            while (isActive) {
+                delay(15_000L)
+                val myId = sessionManager.getCurrentSession()?.userId ?: continue
+                runCatching { syncUserDirectory() }
+                runCatching {
+                    val peers = conversationsFlow.first()
+                        .map { it.peerId }
+                        .ifEmpty {
+                            usersFlow.first()
+                                .filter { !it.userId.equals(myId, ignoreCase = true) }
+                                .map { it.userId }
+                        }
+                        .take(5)
+                    for (peerId in peers) {
+                        syncMessagesWithServer(peerId)
+                    }
+                }
+            }
         }
     }
 
@@ -576,7 +634,11 @@ class ChatRepository(
                         handleRemoteDelete(event.messageId, event.conversationId)
                     }
                     is SignalingEvent.ReceiptUpdated -> {
-                        val status = runCatching { MessageStatus.valueOf(event.status) }
+                        val normStatus = when (event.status.trim().uppercase()) {
+                            "SEEN" -> "READ"
+                            else -> event.status.trim().uppercase()
+                        }
+                        val status = runCatching { MessageStatus.valueOf(normStatus) }
                             .getOrDefault(MessageStatus.DELIVERED)
                         if (event.messageId != null) {
                             messageDao.updateMessageStatus(event.messageId, status)
@@ -585,8 +647,13 @@ class ChatRepository(
                                 event.messageId,
                                 status
                             )
+                            if (status == MessageStatus.READ) {
+                                messageDao.markMyMessagesRead(event.conversationId, myId)
+                                conversationDao.markLastMessageReadIfMine(event.conversationId)
+                            }
                         } else if (status == MessageStatus.READ) {
                             messageDao.markMyMessagesRead(event.conversationId, myId)
+                            conversationDao.markLastMessageReadIfMine(event.conversationId)
                         }
                     }
                     is SignalingEvent.TypingStatusChanged -> {
@@ -1186,7 +1253,7 @@ class ChatRepository(
                         lastLoginFormatted = currentSession.registeredAtFormatted.ifBlank {
                             existingSelf?.lastLoginFormatted ?: formatDateTime(System.currentTimeMillis())
                         },
-                        isOnline = true,
+                        isOnline = signalingClient.isAppInForeground && signalingClient.isConnected.value,
                         isBlocked = existingSelf?.isBlocked ?: false
                     )
                 }
@@ -1308,7 +1375,6 @@ class ChatRepository(
                 val remoteMessages = BackendJsonParsers.parseMessagesFromBody(response.body()?.string())
                 if (remoteMessages.isNotEmpty()) {
                     val prevConv = conversationDao.getConversation(peerId)
-                    val prevLastTs = prevConv?.lastMessageTimestamp ?: 0L
                     val newlyReceivedFromPeer = mutableListOf<MessageEntity>()
 
                     val entities = remoteMessages.map { dto ->
@@ -1317,20 +1383,39 @@ class ChatRepository(
                         if (existing != null) {
                             mergeMessageEntities(existing, incoming)
                         } else {
-                            if (prevConv != null &&
-                                !incoming.senderId.equals(myId, ignoreCase = true) &&
-                                incoming.timestamp > prevLastTs
-                            ) {
+                            if (!incoming.senderId.equals(myId, ignoreCase = true)) {
                                 newlyReceivedFromPeer.add(incoming)
                             }
                             incoming
                         }
                     }
                     messageDao.upsertMessages(entities)
+
+                    // Automatically pre-fetch & cache received videos so thumbnails & fullscreen playback work cleanly
+                    entities.filter {
+                        it.type == MessageType.VIDEO &&
+                            !it.senderId.equals(myId, ignoreCase = true) &&
+                            it.localUri.isNullOrBlank() &&
+                            !it.mediaUrl.isNullOrBlank()
+                    }.forEach { videoMsg ->
+                        scope.launch {
+                            ensureVideoDownloaded(videoMsg.id, videoMsg.mediaUrl!!, videoMsg.fileName)
+                        }
+                    }
+
                     val latest = entities.maxByOrNull { it.timestamp }
                     if (latest != null) {
                         val existing = conversationDao.getConversation(peerId)
                         val peerUser = userDao.getUser(peerId)
+                        val app = context.applicationContext as? HelloSirApplication
+                        val isViewingThisChat = app != null &&
+                            app.isUiInForeground &&
+                            app.activeChatPeerId.equals(peerId, ignoreCase = true)
+                        val updatedUnread = if (isViewingThisChat) {
+                            0
+                        } else {
+                            (existing?.unreadCount ?: 0) + newlyReceivedFromPeer.size
+                        }
                         conversationDao.upsertConversation(
                             ConversationEntity(
                                 peerId = peerId,
@@ -1341,10 +1426,10 @@ class ChatRepository(
                                 lastMessageId = latest.id,
                                 lastMessagePreview = previewForMessage(latest),
                                 lastMessageType = latest.type,
-                                lastMessageTimestamp = latest.timestamp,
+                                lastMessageTimestamp = maxOf(latest.timestamp, existing?.lastMessageTimestamp ?: 0L),
                                 lastMessageStatus = latest.status,
                                 lastMessageIsMine = latest.senderId.equals(myId, ignoreCase = true),
-                                unreadCount = existing?.unreadCount ?: 0,
+                                unreadCount = updatedUnread,
                                 isPeerTyping = existing?.isPeerTyping ?: false
                             )
                         )
@@ -1353,14 +1438,11 @@ class ChatRepository(
                     newlyReceivedFromPeer.maxByOrNull { it.timestamp }?.let { newest ->
                         val peerUser = userDao.getUser(peerId)
                         val resolvedName = peerUser?.displayName ?: prevConv?.peerName ?: peerId
-                        GlobalSecurityEventBus.emitIncomingMessageAlert(
-                            IncomingMessageAlert(
-                                messageId = newest.id,
-                                peerId = peerId,
-                                senderName = resolvedName,
-                                headline = previewForMessage(newest),
-                                timestamp = newest.timestamp
-                            )
+                        maybeNotifyIncomingMessage(
+                            message = newest,
+                            peerId = peerId,
+                            senderName = resolvedName,
+                            headline = previewForMessage(newest)
                         )
                     }
                 }
@@ -1402,13 +1484,9 @@ class ChatRepository(
             fallbackPrefix = "${type.name.lowercase(Locale.ROOT)}_$now",
             defaultExt = defaultExtensionFor(type)
         )
-        val bytes = readBytesFromUri(uri)
-        val cachedUriString = if (bytes != null) {
-            cacheMediaFileLocally(bytes, safeFileName)?.let { Uri.fromFile(it).toString() } ?: uri.toString()
-        } else {
-            uri.toString()
-        }
-        val effectiveSize = rawSize ?: bytes?.size?.toLong()
+        val cachedFile = copyUriToLocalCacheFile(uri, safeFileName)
+        val cachedUriString = cachedFile?.let { Uri.fromFile(it).toString() } ?: uri.toString()
+        val effectiveSize = cachedFile?.length()?.takeIf { it > 0L } ?: rawSize
         val messageId = UUID.randomUUID().toString()
         val cleanContent = caption.trim()
 
@@ -1427,16 +1505,44 @@ class ChatRepository(
         )
         persistOutgoingLocally(peerId, peerName, pendingEntity)
 
-        val uploadedUrl = if (bytes != null) {
-            uploadMediaBytesToBackend(
-                bytes = bytes,
-                fileName = safeFileName,
-                mimeType = mimeType,
-                mediaType = type.name,
-                senderId = myId
+        if (effectiveSize != null && effectiveSize > 0L) {
+            MediaTransferTracker.update(
+                MediaTransferTracker.computeProgress(
+                    messageId = messageId,
+                    isUpload = true,
+                    bytesTransferred = 0L,
+                    totalBytes = effectiveSize,
+                    elapsedMs = 0L
+                )
             )
-        } else {
-            null
+        }
+
+        val uploadedUrl = try {
+            if (cachedFile != null && cachedFile.exists()) {
+                uploadMediaFileWithProgress(
+                    file = cachedFile,
+                    fileName = safeFileName,
+                    mimeType = mimeType,
+                    mediaType = type.name,
+                    senderId = myId,
+                    messageId = messageId
+                )
+            } else {
+                val bytes = readBytesFromUri(uri)
+                if (bytes != null) {
+                    uploadMediaBytesToBackend(
+                        bytes = bytes,
+                        fileName = safeFileName,
+                        mimeType = mimeType,
+                        mediaType = type.name,
+                        senderId = myId
+                    )
+                } else {
+                    null
+                }
+            }
+        } finally {
+            MediaTransferTracker.clear(messageId)
         }
 
         if (!uploadedUrl.isNullOrBlank()) {
@@ -1714,6 +1820,16 @@ class ChatRepository(
         val entity = if (existingMsg != null) mergeMessageEntities(existingMsg, incoming) else incoming
         messageDao.upsertMessage(entity)
 
+        if (!isMine &&
+            entity.type == MessageType.VIDEO &&
+            entity.localUri.isNullOrBlank() &&
+            !entity.mediaUrl.isNullOrBlank()
+        ) {
+            scope.launch {
+                ensureVideoDownloaded(entity.id, entity.mediaUrl!!, entity.fileName)
+            }
+        }
+
         var peerUser = userDao.getUser(peerId)
         if (peerUser == null && !isMine) {
             // Immediately ensure unknown senders appear in Directory too
@@ -1726,7 +1842,17 @@ class ChatRepository(
             ?: peerUser?.displayName?.takeIf { it.isNotBlank() }
             ?: dto.senderName?.takeIf { it.isNotBlank() }
             ?: peerId
-        val newUnread = if (isMine) 0 else (existingConv?.unreadCount ?: 0) + 1
+
+        val app = context.applicationContext as? HelloSirApplication
+        val isViewingThisChat = app != null &&
+            app.isUiInForeground &&
+            app.activeChatPeerId.equals(peerId, ignoreCase = true)
+
+        val newUnread = when {
+            isMine || isViewingThisChat -> 0
+            existingMsg == null -> (existingConv?.unreadCount ?: 0) + 1
+            else -> existingConv?.unreadCount ?: 0
+        }
         val headline = previewForMessage(entity)
 
         conversationDao.upsertConversation(
@@ -1739,7 +1865,7 @@ class ChatRepository(
                 lastMessageId = entity.id,
                 lastMessagePreview = headline,
                 lastMessageType = entity.type,
-                lastMessageTimestamp = entity.timestamp,
+                lastMessageTimestamp = maxOf(entity.timestamp, existingConv?.lastMessageTimestamp ?: 0L),
                 lastMessageStatus = entity.status,
                 lastMessageIsMine = isMine,
                 unreadCount = newUnread,
@@ -1748,28 +1874,66 @@ class ChatRepository(
         )
 
         if (!isMine && existingMsg == null) {
-            GlobalSecurityEventBus.emitIncomingMessageAlert(
-                IncomingMessageAlert(
-                    messageId = entity.id,
-                    peerId = peerId,
-                    senderName = resolvedPeerName,
-                    headline = headline,
-                    timestamp = entity.timestamp
-                )
+            maybeNotifyIncomingMessage(
+                message = entity,
+                peerId = peerId,
+                senderName = resolvedPeerName,
+                headline = headline
             )
             signalingClient.sendReceipt(
                 senderId = myId,
                 receiverId = peerId,
                 messageId = entity.id,
-                status = MessageStatus.DELIVERED.name
+                status = if (isViewingThisChat) MessageStatus.READ.name else MessageStatus.DELIVERED.name
             )
+            if (isViewingThisChat) {
+                runCatching { apiService.markConversationRead(peerId, myId) }
+            }
         }
+    }
+
+    private fun maybeNotifyIncomingMessage(
+        message: MessageEntity,
+        peerId: String,
+        senderName: String,
+        headline: String
+    ) {
+        if (!notifiedMessageIds.add(message.id)) return
+        while (notifiedMessageIds.size > 400) {
+            val first = notifiedMessageIds.firstOrNull() ?: break
+            notifiedMessageIds.remove(first)
+        }
+        val app = context.applicationContext as? HelloSirApplication
+        val isViewingThisChat = app != null &&
+            app.isUiInForeground &&
+            app.activeChatPeerId.equals(peerId, ignoreCase = true)
+        if (isViewingThisChat) return
+
+        GlobalSecurityEventBus.emitIncomingMessageAlert(
+            IncomingMessageAlert(
+                messageId = message.id,
+                peerId = peerId,
+                senderName = senderName,
+                headline = headline,
+                timestamp = message.timestamp
+            )
+        )
+        NotificationHelper.showIncomingMessageNotification(
+            context = context,
+            senderId = peerId,
+            senderName = senderName,
+            preview = headline
+        )
     }
 
     suspend fun markConversationAsRead(peerId: String) = withContext(Dispatchers.IO) {
         val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
         conversationDao.clearUnreadCount(peerId)
         messageDao.markIncomingAsRead(peerId, myId, MessageStatus.READ)
+        runCatching {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm?.cancel(NotificationHelper.messageNotificationIdFor(peerId))
+        }
         signalingClient.sendReceipt(myId, peerId, null, MessageStatus.READ.name)
         runCatching {
             apiService.markConversationRead(peerId, myId)
@@ -1801,7 +1965,10 @@ class ChatRepository(
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
-        signalingClient.disconnect()
+        val currentUserId = sessionManager.getCurrentSession()?.userId.orEmpty()
+        directoryRefreshJob?.cancel()
+        userDao.clearAllOnlineStatuses()
+        signalingClient.sendPresenceAndDisconnect(currentUserId)
         sessionManager.clearSession()
     }
 
@@ -1848,7 +2015,9 @@ class ChatRepository(
         } else {
             parsedType
         }
-        val parsedStatus = runCatching { MessageStatus.valueOf(status.uppercase()) }
+        val rawNormStatus = status.trim().uppercase()
+        val normStatus = if (rawNormStatus == "SEEN") "READ" else rawNormStatus
+        val parsedStatus = runCatching { MessageStatus.valueOf(normStatus) }
             .getOrDefault(MessageStatus.SENT)
         return MessageEntity(
             id = id,
@@ -1884,6 +2053,169 @@ class ChatRepository(
         }
     }
 
+    suspend fun ensureVideoDownloaded(
+        messageId: String,
+        mediaUrl: String,
+        fileName: String?
+    ): String? = withContext(Dispatchers.IO) {
+        val existingLocal = messageDao.getMessageById(messageId)?.localUri?.trim()
+        if (!existingLocal.isNullOrBlank()) {
+            val localPath = if (existingLocal.startsWith("file://")) Uri.parse(existingLocal).path else null
+            if (localPath != null && File(localPath).exists()) {
+                return@withContext existingLocal
+            }
+        }
+        val normalizedUrl = BackendJsonParsers.normalizeMediaUrl(mediaUrl) ?: return@withContext null
+        if (!activeVideoDownloads.add(messageId)) return@withContext null
+
+        val safeBase = (fileName?.takeIf { it.isNotBlank() } ?: "video_${messageId.take(8)}.mp4")
+            .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val dir = File(context.filesDir, "media_cache").apply { mkdirs() }
+        val finalFile = File(dir, "dl_${messageId.take(12)}_$safeBase")
+        if (finalFile.exists() && finalFile.length() > 0L) {
+            activeVideoDownloads.remove(messageId)
+            val fileUri = Uri.fromFile(finalFile).toString()
+            messageDao.updateLocalUri(messageId, fileUri)
+            return@withContext fileUri
+        }
+        val tempFile = File(dir, "dl_${messageId.take(12)}_$safeBase.part")
+
+        return@withContext try {
+            val startMs = System.currentTimeMillis()
+            MediaTransferTracker.update(
+                MediaTransferTracker.computeProgress(
+                    messageId = messageId,
+                    isUpload = false,
+                    bytesTransferred = 0L,
+                    totalBytes = -1L,
+                    elapsedMs = 0L
+                )
+            )
+            val request = Request.Builder().url(normalizedUrl).get().build()
+            mediaHttpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    tempFile.delete()
+                    return@withContext null
+                }
+                val body = resp.body ?: run {
+                    tempFile.delete()
+                    return@withContext null
+                }
+                val totalBytes = body.contentLength()
+                var downloaded = 0L
+                var lastEmitMs = 0L
+                body.byteStream().use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmitMs >= 100L || (totalBytes > 0L && downloaded >= totalBytes)) {
+                                lastEmitMs = now
+                                MediaTransferTracker.update(
+                                    MediaTransferTracker.computeProgress(
+                                        messageId = messageId,
+                                        isUpload = false,
+                                        bytesTransferred = downloaded,
+                                        totalBytes = totalBytes,
+                                        elapsedMs = now - startMs
+                                    )
+                                )
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+            }
+            if (tempFile.exists() && tempFile.length() > 0L) {
+                if (finalFile.exists()) finalFile.delete()
+                tempFile.renameTo(finalFile)
+                val localUri = Uri.fromFile(finalFile).toString()
+                messageDao.updateLocalUri(messageId, localUri)
+                localUri
+            } else {
+                tempFile.delete()
+                null
+            }
+        } catch (_: Exception) {
+            tempFile.delete()
+            null
+        } finally {
+            MediaTransferTracker.clear(messageId)
+            activeVideoDownloads.remove(messageId)
+        }
+    }
+
+    private suspend fun uploadMediaFileWithProgress(
+        file: File,
+        fileName: String,
+        mimeType: String,
+        mediaType: String,
+        senderId: String,
+        messageId: String
+    ): String? {
+        return runCatching {
+            val requestBody = ProgressFileRequestBody(
+                file = file,
+                contentType = mimeType.toMediaTypeOrNull(),
+                messageId = messageId
+            )
+            val filePart = MultipartBody.Part.createFormData("file", fileName, requestBody)
+            val uploadResp = apiService.uploadMedia(
+                file = filePart,
+                type = mediaType.toRequestBody("text/plain".toMediaTypeOrNull()),
+                senderId = senderId.toRequestBody("text/plain".toMediaTypeOrNull())
+            )
+            if (uploadResp.isSuccessful) {
+                BackendJsonParsers.parseMediaUploadUrl(uploadResp.body()?.string())
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    private class ProgressFileRequestBody(
+        private val file: File,
+        private val contentType: MediaType?,
+        private val messageId: String
+    ) : RequestBody() {
+        override fun contentType(): MediaType? = contentType
+
+        override fun contentLength(): Long = file.length()
+
+        override fun writeTo(sink: BufferedSink) {
+            val total = file.length()
+            val startMs = System.currentTimeMillis()
+            var uploaded = 0L
+            var lastEmitMs = 0L
+            val buffer = ByteArray(16 * 1024)
+            FileInputStream(file).use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    sink.write(buffer, 0, read)
+                    uploaded += read
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmitMs >= 100L || uploaded >= total) {
+                        lastEmitMs = now
+                        MediaTransferTracker.update(
+                            MediaTransferTracker.computeProgress(
+                                messageId = messageId,
+                                isUpload = true,
+                                bytesTransferred = uploaded,
+                                totalBytes = total,
+                                elapsedMs = now - startMs
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private suspend fun uploadMediaBytesToBackend(
         bytes: ByteArray,
         fileName: String,
@@ -1910,6 +2242,30 @@ class ChatRepository(
         }.getOrNull()
     }
 
+    private fun copyUriToLocalCacheFile(uri: Uri, fileName: String): File? {
+        return runCatching {
+            val dir = File(context.filesDir, "media_cache").apply { mkdirs() }
+            val safeBase = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val dest = File(dir, "${UUID.randomUUID()}_$safeBase")
+            val input = if (uri.scheme == "file" && uri.path != null) {
+                File(uri.path!!).takeIf { it.exists() }?.let { FileInputStream(it) }
+            } else {
+                context.contentResolver.openInputStream(uri)
+            } ?: return@runCatching null
+
+            input.use { src ->
+                FileOutputStream(dest).use { out ->
+                    src.copyTo(out, bufferSize = 16 * 1024)
+                    out.flush()
+                }
+            }
+            if (dest.exists() && dest.length() > 0L) dest else {
+                dest.delete()
+                null
+            }
+        }.getOrNull()
+    }
+
     private fun readBytesFromUri(uri: Uri): ByteArray? {
         return runCatching {
             if (uri.scheme == "file" && uri.path != null) {
@@ -1917,16 +2273,6 @@ class ChatRepository(
                 if (file.exists()) return@runCatching file.readBytes()
             }
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-    }
-
-    private fun cacheMediaFileLocally(bytes: ByteArray, fileName: String): File? {
-        return runCatching {
-            val dir = File(context.filesDir, "media_cache").apply { mkdirs() }
-            val safeBase = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val dest = File(dir, "${UUID.randomUUID()}_$safeBase")
-            dest.writeBytes(bytes)
-            dest
         }.getOrNull()
     }
 

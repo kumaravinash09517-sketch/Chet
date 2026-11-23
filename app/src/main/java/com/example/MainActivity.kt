@@ -128,10 +128,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        val app = application as HelloSirApplication
+        app.isUiInForeground = true
+        app.signalingClient.setAppForeground(true)
+    }
+
     override fun onResume() {
         super.onResume()
         val app = application as HelloSirApplication
         app.isUiInForeground = true
+        app.signalingClient.setAppForeground(true)
         callViewModel.onAppResumed()
         lifecycleScope.launch {
             app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
@@ -141,6 +149,15 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         (application as HelloSirApplication).isUiInForeground = false
         super.onPause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            val app = application as HelloSirApplication
+            app.isUiInForeground = false
+            app.signalingClient.setAppForeground(false)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -294,7 +311,9 @@ private fun HelloSirRoot(
                 isFrontCamera = isFrontCamera,
                 hasRemoteVideo = hasRemoteVideo,
                 durationSeconds = duration,
-                onAttachRenderers = { local, remote -> callViewModel.attachRenderers(local, remote) },
+                onAttachRenderers = { local, remote, forceRebind ->
+                    callViewModel.attachRenderers(local, remote, forceRebind)
+                },
                 onAudioPermissionGranted = { callViewModel.onAudioPermissionGranted() },
                 onCameraPermissionGranted = { callViewModel.onCameraPermissionGranted() },
                 onAcceptIncoming = { callViewModel.acceptIncomingCall() },
@@ -379,6 +398,8 @@ private fun HelloSirRoot(
                     }
 
                     val messages by chatViewModel.messages.collectAsStateWithLifecycle()
+                    val peerUser by chatViewModel.peerUser.collectAsStateWithLifecycle()
+                    val mediaTransferProgress by chatViewModel.mediaTransferProgress.collectAsStateWithLifecycle()
                     val myUserId by chatViewModel.myUserId.collectAsStateWithLifecycle()
                     val isPeerTyping by chatViewModel.isPeerTyping.collectAsStateWithLifecycle()
                     val liveLocId by chatViewModel.liveLocationMessageId.collectAsStateWithLifecycle()
@@ -387,8 +408,10 @@ private fun HelloSirRoot(
                     ChatScreen(
                         peerId = route.peerId,
                         peerName = route.peerName,
+                        peerIsOnline = peerUser?.isOnline == true,
                         myUserId = myUserId,
                         messages = messages,
+                        mediaTransferProgress = mediaTransferProgress,
                         isPeerTyping = isPeerTyping,
                         liveLocationMessageId = liveLocId,
                         statusBanner = statusBanner,
@@ -397,6 +420,7 @@ private fun HelloSirRoot(
                         onComposerTextChanged = { chatViewModel.onComposerTextChanged(it) },
                         onSendText = { chatViewModel.sendText(it) },
                         onSendMedia = { uri, type -> chatViewModel.sendMedia(uri, type) },
+                        onEnsureVideoDownloaded = { msg -> chatViewModel.ensureVideoDownloaded(msg) },
                         onShareCurrentLocation = { chatViewModel.shareCurrentLocation() },
                         onStartLiveLocation = { chatViewModel.startLiveLocationSharing() },
                         onStopLiveLocation = { chatViewModel.stopLiveLocationSharing() },

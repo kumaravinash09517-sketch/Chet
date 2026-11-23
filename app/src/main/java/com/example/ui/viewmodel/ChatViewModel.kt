@@ -8,6 +8,8 @@ import com.example.HelloSirApplication
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
+import com.example.data.local.UserEntity
+import com.example.data.repository.MediaTransferProgress
 import com.example.platform.DeviceContact
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -41,12 +43,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
+    private val _peerUser = MutableStateFlow<UserEntity?>(null)
+    val peerUser: StateFlow<UserEntity?> = _peerUser.asStateFlow()
+
+    val mediaTransferProgress: StateFlow<Map<String, MediaTransferProgress>> =
+        repository.mediaTransferProgress
+
     val myUserId: StateFlow<String> = repository.sessionFlow
         .combine(MutableStateFlow("")) { session, _ -> session?.userId.orEmpty() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
     private var messagesJob: Job? = null
     private var conversationJob: Job? = null
+    private var peerUserJob: Job? = null
     private var typingTimeoutJob: Job? = null
     private var liveLocationJob: Job? = null
     private var periodicSyncJob: Job? = null
@@ -69,6 +78,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 repository.conversationsFlow.collect { convs: List<ConversationEntity> ->
                     val conv = convs.firstOrNull { it.peerId == peerId }
                     _isPeerTyping.value = conv?.isPeerTyping == true
+                }
+            }
+
+            peerUserJob?.cancel()
+            peerUserJob = viewModelScope.launch {
+                repository.observeUser(peerId).collect { user ->
+                    _peerUser.value = user
                 }
             }
 
@@ -134,6 +150,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (peerId.isBlank()) return
         viewModelScope.launch {
             repository.sendMediaMessage(peerId, peerName, uri, type, caption)
+        }
+    }
+
+    fun ensureVideoDownloaded(message: MessageEntity) {
+        val remoteUrl = message.mediaUrl?.takeIf { it.isNotBlank() } ?: return
+        viewModelScope.launch {
+            repository.ensureVideoDownloaded(
+                messageId = message.id,
+                mediaUrl = remoteUrl,
+                fileName = message.fileName
+            )
         }
     }
 
@@ -240,6 +267,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         liveLocationJob?.cancel()
         periodicSyncJob?.cancel()
+        peerUserJob?.cancel()
         super.onCleared()
     }
 }

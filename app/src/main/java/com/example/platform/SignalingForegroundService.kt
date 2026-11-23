@@ -60,29 +60,6 @@ class SignalingForegroundService : Service() {
                             )
                         }
                     }
-                    is SignalingEvent.ChatMessageReceived -> {
-                        if (!event.dto.senderId.equals(myId, ignoreCase = true) && !app.isUiInForeground) {
-                            val senderUser = app.database.userDao().getUser(event.dto.senderId)
-                            val senderName = senderUser?.displayName?.takeIf { it.isNotBlank() }
-                                ?: event.dto.senderName?.takeIf { it.isNotBlank() }
-                                ?: event.dto.senderId
-                            val preview = when (event.dto.type.uppercase()) {
-                                "IMAGE" -> if (event.dto.content.isNotBlank()) "Photo: ${event.dto.content}" else "Sent a photo"
-                                "VIDEO" -> event.dto.fileName?.let { "Video: $it" } ?: "Sent a video"
-                                "AUDIO" -> event.dto.fileName?.let { "Audio: $it" } ?: "Sent an audio clip"
-                                "DOCUMENT" -> event.dto.fileName ?: "Sent a document"
-                                "LOCATION", "LIVE_LOCATION" -> event.dto.content.ifBlank { "Shared a GPS location" }
-                                "CONTACT" -> "Shared a contact"
-                                else -> event.dto.content.ifBlank { "New message" }
-                            }
-                            NotificationHelper.showIncomingMessageNotification(
-                                context = this@SignalingForegroundService,
-                                senderId = event.dto.senderId,
-                                senderName = senderName,
-                                preview = preview
-                            )
-                        }
-                    }
                     is SignalingEvent.CallEnded -> {
                         NotificationHelper.stopRingtoneAndVibrate(this@SignalingForegroundService)
                     }

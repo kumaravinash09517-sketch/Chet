@@ -74,7 +74,7 @@ fun CallScreen(
     isFrontCamera: Boolean,
     hasRemoteVideo: Boolean,
     durationSeconds: Long,
-    onAttachRenderers: (local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) -> Unit,
+    onAttachRenderers: (local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?, forceRebind: Boolean) -> Unit,
     onAudioPermissionGranted: () -> Unit = {},
     onCameraPermissionGranted: () -> Unit,
     onAcceptIncoming: () -> Unit,
@@ -145,12 +145,18 @@ fun CallScreen(
         }
     }
 
-    // Request RECORD_AUDIO (and CAMERA for video calls) automatically during active calls
-    LaunchedEffect(isVideoCall, callState) {
-        if (callState is CallState.OutgoingRinging ||
-            callState is CallState.Connecting ||
-            callState is CallState.Connected
-        ) {
+    val callPhaseKey = when (callState) {
+        is CallState.OutgoingRinging -> "out"
+        is CallState.IncomingRinging -> "in"
+        is CallState.Connecting -> "conn"
+        is CallState.Connected -> "live"
+        is CallState.Ended -> "ended"
+        CallState.Idle -> "idle"
+    }
+
+    // Request RECORD_AUDIO (and CAMERA for video calls) automatically during active call phases
+    LaunchedEffect(isVideoCall, callPhaseKey) {
+        if (callPhaseKey in setOf("out", "conn", "live")) {
             val missing = buildList {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     add(Manifest.permission.RECORD_AUDIO)
@@ -163,7 +169,7 @@ fun CallScreen(
                 callPermissionLauncher.launch(missing.toTypedArray())
             } else {
                 onAudioPermissionGranted()
-                if (isVideoCall) {
+                if (isVideoCall && isVideoEnabled) {
                     onCameraPermissionGranted()
                 }
             }
@@ -191,14 +197,14 @@ fun CallScreen(
         CallState.Idle -> ""
     }
 
-    DisposableEffect(isVideoCall, isActiveCall) {
+    DisposableEffect(isVideoCall, isActiveCall, showLocalPreview) {
         if (isVideoCall && isActiveCall) {
-            onAttachRenderers(localView, remoteView)
+            onAttachRenderers(localView, remoteView, showLocalPreview)
         } else {
-            onAttachRenderers(null, null)
+            onAttachRenderers(null, null, false)
         }
         onDispose {
-            onAttachRenderers(null, null)
+            onAttachRenderers(null, null, false)
         }
     }
 

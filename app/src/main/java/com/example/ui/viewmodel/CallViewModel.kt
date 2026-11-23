@@ -481,18 +481,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun attachRenderers(local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) {
+    fun attachRenderers(
+        local: SurfaceViewRenderer?,
+        remote: SurfaceViewRenderer?,
+        forceRebind: Boolean = false
+    ) {
         attachedLocalRenderer = local
         attachedRemoteRenderer = remote
-        syncRenderersToClient()
+        syncRenderersToClient(forceRebind = forceRebind)
     }
 
-    private fun syncRenderersToClient() {
+    private fun syncRenderersToClient(forceRebind: Boolean = false) {
         val client = webRTCClient ?: return
         if (activeIsVideo) {
-            client.attachRenderers(attachedLocalRenderer, attachedRemoteRenderer)
+            client.attachRenderers(attachedLocalRenderer, attachedRemoteRenderer, forceRebind = forceRebind)
         } else {
-            client.attachRenderers(null, null)
+            client.attachRenderers(null, null, forceRebind = forceRebind)
         }
     }
 
@@ -513,7 +517,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _isVideoEnabled.value = next
         webRTCClient?.setVideoEnabled(next)
         if (next) {
-            syncRenderersToClient()
+            syncRenderersToClient(forceRebind = true)
         }
     }
 

@@ -67,4 +67,42 @@ class ExampleUnitTest {
     assertEquals("u_919455877902", direct.userId)
     assertEquals("tok", google.idToken)
   }
+
+  @Test
+  fun mediaTransferTrackerComputesProgressPercentageAndEta() {
+    assertEquals("~12s left", com.example.data.repository.MediaTransferTracker.formatEtaRemaining(12L))
+    assertEquals("~1 min left", com.example.data.repository.MediaTransferTracker.formatEtaRemaining(62L))
+    assertEquals("~1m 15s left", com.example.data.repository.MediaTransferTracker.formatEtaRemaining(75L))
+
+    val uploadProgress = com.example.data.repository.MediaTransferTracker.computeProgress(
+      messageId = "msg_vid_1",
+      isUpload = true,
+      bytesTransferred = 5_000_000L,
+      totalBytes = 10_000_000L,
+      elapsedMs = 5_000L
+    )
+    assertEquals(0.5f, uploadProgress.fraction, 0.01f)
+    assertTrue(uploadProgress.statusLabel.startsWith("Uploading 50%"))
+    assertTrue(uploadProgress.statusLabel.contains("left"))
+
+    val downloadProgress = com.example.data.repository.MediaTransferTracker.computeProgress(
+      messageId = "msg_vid_2",
+      isUpload = false,
+      bytesTransferred = 2_500_000L,
+      totalBytes = 10_000_000L,
+      elapsedMs = 1_000L
+    )
+    assertEquals(0.25f, downloadProgress.fraction, 0.01f)
+    assertTrue(downloadProgress.statusLabel.startsWith("Downloading 25%"))
+    assertEquals(3L, downloadProgress.etaSeconds)
+  }
+
+  @Test
+  fun notificationHelperGeneratesDistinctMessageNotificationIdsPerSender() {
+    val id1 = com.example.platform.NotificationHelper.messageNotificationIdFor("u_avinash")
+    val id2 = com.example.platform.NotificationHelper.messageNotificationIdFor("u_sandeep")
+    assertTrue(id1 >= 50_000)
+    assertTrue(id2 >= 50_000)
+    assertNotEquals(id1, id2)
+  }
 }

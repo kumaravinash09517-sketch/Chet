@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -84,9 +85,11 @@ import com.example.data.local.UserEntity
 import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
 import com.example.platform.ShayariManager
+import com.example.ui.theme.CrimsonAlert
 import com.example.ui.theme.OnlineGreen
 import com.example.ui.theme.ReadCheckBlue
 import com.example.ui.theme.ReadCheckBlueOnBubble
+import androidx.compose.ui.graphics.Color
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -361,7 +364,16 @@ fun HomeScreen(
                         }
                     )
                 } else {
+                    val chatsListState = rememberLazyListState()
+                    val topPeer = filteredConversations.firstOrNull()?.peerId
+                    val topTs = filteredConversations.firstOrNull()?.lastMessageTimestamp ?: 0L
+                    LaunchedEffect(topPeer, topTs) {
+                        if (searchQuery.isBlank() && chatsListState.firstVisibleItemIndex <= 1 && filteredConversations.isNotEmpty()) {
+                            chatsListState.animateScrollToItem(0)
+                        }
+                    }
                     LazyColumn(
+                        state = chatsListState,
                         contentPadding = PaddingValues(bottom = 88.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
@@ -571,8 +583,9 @@ private fun ConversationRow(
                 Text(
                     text = formatShortTime(conversation.lastMessageTimestamp),
                     style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (conversation.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
                     color = if (conversation.unreadCount > 0) {
-                        MaterialTheme.colorScheme.primary
+                        CrimsonAlert
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     }
@@ -616,12 +629,14 @@ private fun ConversationRow(
                     Spacer(modifier = Modifier.width(8.dp))
                     Surface(
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primary
+                        color = CrimsonAlert,
+                        modifier = Modifier.testTag("unread_badge_${conversation.peerId}")
                     ) {
                         Text(
                             text = conversation.unreadCount.toString(),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                         )
                     }
@@ -687,7 +702,11 @@ private fun RegisteredUserRow(
                 )
             }
             Spacer(modifier = Modifier.height(3.dp))
-            val statusPrefix = if (user.isOnline) "Online" else "Last login: ${user.lastLoginFormatted}"
+            val statusPrefix = when {
+                user.isOnline -> "Online"
+                user.lastLoginFormatted.isNotBlank() -> "Offline • Last seen: ${user.lastLoginFormatted}"
+                else -> "Offline"
+            }
             val secondaryMeta = if (user.phone.isNotBlank()) "${user.phone} • $statusPrefix" else statusPrefix
             Text(
                 text = secondaryMeta,

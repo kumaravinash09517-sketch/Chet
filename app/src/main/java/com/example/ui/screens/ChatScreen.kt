@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -77,11 +78,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
+import com.example.data.repository.MediaTransferProgress
 import com.example.ui.theme.OnlineGreen
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,8 +92,10 @@ import com.example.ui.theme.OnlineGreen
 fun ChatScreen(
     peerId: String,
     peerName: String,
+    peerIsOnline: Boolean = false,
     myUserId: String,
     messages: List<MessageEntity>,
+    mediaTransferProgress: Map<String, MediaTransferProgress> = emptyMap(),
     isPeerTyping: Boolean,
     liveLocationMessageId: String?,
     statusBanner: String?,
@@ -99,6 +104,7 @@ fun ChatScreen(
     onComposerTextChanged: (String) -> Unit,
     onSendText: (String) -> Unit,
     onSendMedia: (uri: android.net.Uri, type: MessageType) -> Unit,
+    onEnsureVideoDownloaded: (MessageEntity) -> Unit = {},
     onShareCurrentLocation: () -> Unit,
     onStartLiveLocation: () -> Unit,
     onStopLiveLocation: () -> Unit,
@@ -252,10 +258,17 @@ fun ChatScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = if (isPeerTyping) "typing…" else "@$peerId",
+                                text = when {
+                                    isPeerTyping -> "typing…"
+                                    peerIsOnline -> "Online • @$peerId"
+                                    else -> "Offline • @$peerId"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isPeerTyping) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = when {
+                                    isPeerTyping -> MaterialTheme.colorScheme.primary
+                                    peerIsOnline -> OnlineGreen
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
                             )
                         }
                     }
@@ -399,9 +412,11 @@ fun ChatScreen(
                     ChatMessageBubble(
                         message = message,
                         isMine = message.senderId == myUserId,
+                        transferProgress = mediaTransferProgress[message.id],
                         onLongPressDelete = { msg -> messageToDelete = msg },
                         onImagePreview = { url -> previewImageUrl = url },
                         onVideoPreview = { url -> previewVideoUrl = url },
+                        onEnsureVideoDownloaded = onEnsureVideoDownloaded,
                         onStopLiveLocation = onStopLiveLocation
                     )
                 }
@@ -512,26 +527,59 @@ fun ChatScreen(
 
     if (previewVideoUrl != null) {
         val videoSource = previewVideoUrl!!
-        Dialog(onDismissRequest = { previewVideoUrl = null }) {
+        Dialog(
+            onDismissRequest = { previewVideoUrl = null },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
             var isBuffering by remember(videoSource) { mutableStateOf(true) }
             var videoError by remember(videoSource) { mutableStateOf(false) }
+            var videoViewRef by remember(videoSource) { mutableStateOf<VideoView?>(null) }
+
+            DisposableEffect(videoSource) {
+                onDispose {
+                    runCatching { videoViewRef?.stopPlayback() }
+                    videoViewRef = null
+                }
+            }
+
             Surface(
-                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("fullscreen_video_player"),
                 color = Color.Black
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .navigationBarsPadding()
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                            .statusBarsPadding()
+                            .background(Color.Black.copy(alpha = 0.72f))
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "Video Player",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = Color.White
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { previewVideoUrl = null }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                    contentDescription = "Back from video player",
+                                    tint = Color.White
+                                )
+                            }
+                            Text(
+                                text = "Video Player",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White
+                            )
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(
                                 onClick = {
@@ -559,8 +607,9 @@ fun ChatScreen(
 
                     Box(
                         modifier = Modifier
+                            .weight(1f)
                             .fillMaxWidth()
-                            .height(280.dp),
+                            .background(Color.Black),
                         contentAlignment = Alignment.Center
                     ) {
                         AndroidView(
@@ -581,7 +630,10 @@ fun ChatScreen(
                                     }
                                     setVideoURI(Uri.parse(videoSource))
                                     requestFocus()
-                                }
+                                }.also { videoViewRef = it }
+                            },
+                            update = { view ->
+                                videoViewRef = view
                             },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -589,8 +641,8 @@ fun ChatScreen(
                             CircularProgressIndicator(color = Color.White)
                         } else if (videoError) {
                             Text(
-                                text = "Unable to stream video in-app. Tap Open External.",
-                                style = MaterialTheme.typography.bodySmall,
+                                text = "Unable to play video in-app. Tap Open External.",
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = Color.White,
                                 modifier = Modifier.padding(16.dp)
                             )

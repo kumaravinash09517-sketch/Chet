@@ -58,7 +58,7 @@ class CallNotificationReceiver : BroadcastReceiver() {
                         try {
                             app.chatRepository.sendTextMessage(peerId, peerName, replyText)
                             val nm = context.getSystemService(NotificationManager::class.java)
-                            nm?.cancel(peerId.hashCode())
+                            nm?.cancel(NotificationHelper.messageNotificationIdFor(peerId))
                         } finally {
                             pendingResult.finish()
                         }
