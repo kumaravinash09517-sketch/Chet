@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
         val app = application as HelloSirApplication
         app.isUiInForeground = true
         app.signalingClient.setAppForeground(true)
+        app.chatRepository.markLocalSelfPresence(true)
     }
 
     override fun onResume() {
@@ -140,8 +141,10 @@ class MainActivity : ComponentActivity() {
         val app = application as HelloSirApplication
         app.isUiInForeground = true
         app.signalingClient.setAppForeground(true)
+        app.chatRepository.markLocalSelfPresence(true)
         callViewModel.onAppResumed()
         lifecycleScope.launch {
+            app.chatRepository.syncUserDirectory()
             app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
         }
     }
@@ -157,6 +160,7 @@ class MainActivity : ComponentActivity() {
             val app = application as HelloSirApplication
             app.isUiInForeground = false
             app.signalingClient.setAppForeground(false)
+            app.chatRepository.markLocalSelfPresence(false)
         }
     }
 
@@ -399,7 +403,6 @@ private fun HelloSirRoot(
 
                     val messages by chatViewModel.messages.collectAsStateWithLifecycle()
                     val peerUser by chatViewModel.peerUser.collectAsStateWithLifecycle()
-                    val mediaTransferProgress by chatViewModel.mediaTransferProgress.collectAsStateWithLifecycle()
                     val myUserId by chatViewModel.myUserId.collectAsStateWithLifecycle()
                     val isPeerTyping by chatViewModel.isPeerTyping.collectAsStateWithLifecycle()
                     val liveLocId by chatViewModel.liveLocationMessageId.collectAsStateWithLifecycle()
@@ -411,7 +414,6 @@ private fun HelloSirRoot(
                         peerIsOnline = peerUser?.isOnline == true,
                         myUserId = myUserId,
                         messages = messages,
-                        mediaTransferProgress = mediaTransferProgress,
                         isPeerTyping = isPeerTyping,
                         liveLocationMessageId = liveLocId,
                         statusBanner = statusBanner,

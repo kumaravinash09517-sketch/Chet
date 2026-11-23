@@ -9,11 +9,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Persistent foreground relay service keeping WebSocket signaling active
- * in the background so incoming calls and messages trigger ringtones and alerts.
+ * Persistent foreground relay service polling incoming calls and messages via HTTP
+ * whenever the UI is in background (so WebSocket can stay closed for strict offline presence)
+ * and raising incoming call notifications immediately.
  */
 class SignalingForegroundService : Service() {
 
@@ -29,8 +32,8 @@ class SignalingForegroundService : Service() {
         )
 
         val app = application as HelloSirApplication
-        app.signalingClient.connect()
 
+        // Listen for incoming call offers dispatched from either WS (if connected) or background HTTP poll
         serviceScope.launch {
             app.signalingClient.events.collect { event ->
                 val myId = app.sessionManager.getCurrentSession()?.userId ?: return@collect
@@ -67,11 +70,28 @@ class SignalingForegroundService : Service() {
                 }
             }
         }
+
+        // Background HTTP poll loop when UI is NOT in foreground (so user stays strictly Offline while still getting alerts)
+        serviceScope.launch {
+            var tick = 0
+            while (isActive) {
+                delay(2_500L)
+                val session = app.sessionManager.getCurrentSession() ?: continue
+                if (app.isUiInForeground) continue
+
+                tick++
+                if (tick % 2 == 0) {
+                    runCatching { app.chatRepository.pollBackgroundMessagesForNotifications(session.userId) }
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as HelloSirApplication
-        app.signalingClient.connect()
+        if (app.isUiInForeground) {
+            app.signalingClient.setAppForeground(true)
+        }
         return START_STICKY
     }
 

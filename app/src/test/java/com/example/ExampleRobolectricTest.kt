@@ -788,4 +788,166 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `sessionManager persists userId and displayName across simulated update key rotation until explicit logout`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sessionManager = com.example.core.security.SessionManager(context)
+        sessionManager.clearSession()
+
+        val saved = sessionManager.saveSession(
+            userId = "avinash_9455",
+            displayName = "Avinash",
+            phone = "+919455877902",
+            avatarUrl = null,
+            serverToken = "tok_persist_1",
+            registeredAtMillis = 1_763_800_000_000L,
+            registeredAtFormatted = "22 Nov 2026, 10:00 AM"
+        )
+        assertEquals("avinash_9455", saved.userId)
+        assertEquals("Avinash", saved.displayName)
+
+        // Simulate app update / Keystore key rotation corrupting DataStore cipher blob
+        sessionManager.simulateUpdateKeyRotationForTest()
+        val recovered = sessionManager.getCurrentSession()
+        assertEquals("avinash_9455", recovered?.userId)
+        assertEquals("Avinash", recovered?.displayName)
+
+        // Explicit logout must clear session completely
+        sessionManager.clearSession()
+        assertEquals(null, sessionManager.getCurrentSession())
+    }
+
+    @Test
+    fun `deleteUsersNotIn and deleteEmptyConversationsNotIn prune stale dummy clutter`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val userDao = db.userDao()
+            val convDao = db.conversationDao()
+
+            userDao.upsertUsers(
+                listOf(
+                    com.example.data.local.UserEntity("u_active", "Avinash", lastLoginMillis = 1000L, lastLoginFormatted = "now"),
+                    com.example.data.local.UserEntity("dummy_old", "Stale Dummy", lastLoginMillis = 500L, lastLoginFormatted = "old")
+                )
+            )
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "dummy_old",
+                    peerName = "Stale Dummy",
+                    lastMessageId = null,
+                    lastMessagePreview = "Tap to start secure chat",
+                    lastMessageTimestamp = 500L
+                )
+            )
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "real_history_peer",
+                    peerName = "Real Peer",
+                    lastMessageId = "m_hist_1",
+                    lastMessagePreview = "Saved chat history",
+                    lastMessageTimestamp = 900L
+                )
+            )
+
+            val activeIds = listOf("u_active")
+            userDao.deleteUsersNotIn(activeIds)
+            convDao.deleteEmptyConversationsNotIn(activeIds)
+
+            val remainingUsers = userDao.observeAllUsers().first()
+            assertEquals(1, remainingUsers.size)
+            assertEquals("u_active", remainingUsers.first().userId)
+
+            val remainingConvs = convDao.observeConversations().first()
+            assertEquals(1, remainingConvs.size)
+            assertEquals("real_history_peer", remainingConvs.first().peerId)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `backendJsonParsers enforces strict foreground presence and boolean receipt flags`() {
+        val users = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """
+            {
+              "users": [
+                {"userId":"u_bg","displayName":"BackgroundUser","isOnline":true,"inForeground":false},
+                {"userId":"u_fg","displayName":"ForegroundUser","isOnline":true,"appState":"foreground"},
+                {"userId":"u_paused","displayName":"PausedUser","online":true,"appState":"background"}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(3, users.size)
+        org.junit.Assert.assertFalse(users[0].resolvedIsOnline())
+        assertTrue(users[1].resolvedIsOnline())
+        org.junit.Assert.assertFalse(users[2].resolvedIsOnline())
+
+        val msgs = com.example.data.remote.BackendJsonParsers.parseMessagesFromBody(
+            """
+            {
+              "messages": [
+                {"id":"m_deliv","senderId":"a","receiverId":"b","text":"Hi","isDelivered":true,"timestamp":1000},
+                {"id":"m_read_flag","senderId":"a","receiverId":"b","text":"Hello","isRead":true,"deliveredAt":"2026-11-22T10:00:00Z","timestamp":2000}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(2, msgs.size)
+        assertEquals("DELIVERED", msgs[0].status)
+        assertEquals("READ", msgs[1].status)
+    }
+
+    @Test
+    fun `messageDao and conversationDao advance SENT to DELIVERED cleanly`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val msgDao = db.messageDao()
+            val convDao = db.conversationDao()
+            msgDao.upsertMessage(
+                com.example.data.local.MessageEntity(
+                    id = "m_1",
+                    conversationId = "peer_sandeep",
+                    senderId = "me_avinash",
+                    receiverId = "peer_sandeep",
+                    content = "Hello",
+                    status = MessageStatus.SENT,
+                    timestamp = 1000L
+                )
+            )
+            convDao.upsertConversation(
+                ConversationEntity(
+                    peerId = "peer_sandeep",
+                    peerName = "Sandeep",
+                    lastMessageId = "m_1",
+                    lastMessagePreview = "Hello",
+                    lastMessageType = MessageType.TEXT,
+                    lastMessageTimestamp = 1000L,
+                    lastMessageStatus = MessageStatus.SENT,
+                    lastMessageIsMine = true
+                )
+            )
+
+            msgDao.markMyMessagesDelivered("peer_sandeep", "me_avinash")
+            convDao.markLastMessageDeliveredIfMine("peer_sandeep")
+
+            assertEquals(MessageStatus.DELIVERED, msgDao.getMessageById("m_1")?.status)
+            assertEquals(MessageStatus.DELIVERED, convDao.getConversation("peer_sandeep")?.lastMessageStatus)
+
+            msgDao.markMyMessagesRead("peer_sandeep", "me_avinash")
+            convDao.markLastMessageReadIfMine("peer_sandeep")
+
+            assertEquals(MessageStatus.READ, msgDao.getMessageById("m_1")?.status)
+            assertEquals(MessageStatus.READ, convDao.getConversation("peer_sandeep")?.lastMessageStatus)
+        } finally {
+            db.close()
+        }
+    }
 }

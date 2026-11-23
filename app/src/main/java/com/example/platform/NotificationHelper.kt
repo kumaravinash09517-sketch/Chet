@@ -24,7 +24,7 @@ import com.example.R
 
 object NotificationHelper {
     const val CHANNEL_CALLS = "hello_sir_calls_v2"
-    const val CHANNEL_MESSAGES = "hello_sir_messages_v2"
+    const val CHANNEL_MESSAGES = "hello_sir_messages_v3"
     const val CHANNEL_SYNC = "hello_sir_sync"
     const val CHANNEL_SHAYARI = "hello_sir_shayari"
 
@@ -252,7 +252,8 @@ object NotificationHelper {
         context: Context,
         senderId: String,
         senderName: String,
-        preview: String
+        preview: String,
+        unreadCount: Int = 1
     ) {
         if (!canPostNotifications(context)) return
         createChannels(context)
@@ -295,15 +296,24 @@ object NotificationHelper {
             replyPending
         ).addRemoteInput(remoteInput).build()
 
+        val style = NotificationCompat.BigTextStyle()
+            .setBigContentTitle(senderTitle)
+            .bigText(preview)
+
         val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle(senderTitle)
             .setContentText(preview)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setTicker("$senderTitle: $preview")
+            .setStyle(style)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setWhen(System.currentTimeMillis())
+            .setShowWhen(true)
+            .setOnlyAlertOnce(false)
+            .setNumber(unreadCount.coerceAtLeast(1))
             .setAutoCancel(true)
             .setContentIntent(openPending)
             .addAction(replyAction)

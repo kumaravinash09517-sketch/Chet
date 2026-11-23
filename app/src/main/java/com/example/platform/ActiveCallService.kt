@@ -37,8 +37,26 @@ class ActiveCallService : Service() {
             if (type == 0) {
                 type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             }
-            runCatching {
+            val startedPrimary = runCatching {
                 startForeground(NotificationHelper.NOTIFICATION_ACTIVE_CALL_ID, notification, type)
+            }.isSuccess
+            if (!startedPrimary) {
+                val fallbackType = when {
+                    hasMic -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
+                val startedFallback = runCatching {
+                    startForeground(NotificationHelper.NOTIFICATION_ACTIVE_CALL_ID, notification, fallbackType)
+                }.isSuccess
+                if (!startedFallback) {
+                    runCatching {
+                        startForeground(
+                            NotificationHelper.NOTIFICATION_ACTIVE_CALL_ID,
+                            notification,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                        )
+                    }
+                }
             }
         } else {
             runCatching {

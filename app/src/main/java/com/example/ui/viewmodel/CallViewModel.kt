@@ -259,7 +259,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             app.sessionManager.getCurrentSession() ?: return@launch
             if (!signalingClient.isConnected.value) {
-                signalingClient.connect()
+                signalingClient.connect(forceDuringCall = true)
             }
             activeCallId = UUID.randomUUID().toString()
             activePeerId = peerId
@@ -305,7 +305,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             if (!signalingClient.isConnected.value) {
-                signalingClient.connect()
+                signalingClient.connect(forceDuringCall = true)
             }
             activeCallId = incoming.callId.ifBlank { activeCallId.ifBlank { UUID.randomUUID().toString() } }
             repository.markCallAnswered(activeCallId)

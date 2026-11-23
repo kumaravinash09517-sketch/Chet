@@ -197,9 +197,9 @@ fun CallScreen(
         CallState.Idle -> ""
     }
 
-    DisposableEffect(isVideoCall, isActiveCall, showLocalPreview) {
+    DisposableEffect(isVideoCall, isActiveCall) {
         if (isVideoCall && isActiveCall) {
-            onAttachRenderers(localView, remoteView, showLocalPreview)
+            onAttachRenderers(localView, remoteView, false)
         } else {
             onAttachRenderers(null, null, false)
         }

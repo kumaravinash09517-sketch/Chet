@@ -412,7 +412,7 @@ fun ChatScreen(
                     ChatMessageBubble(
                         message = message,
                         isMine = message.senderId == myUserId,
-                        transferProgress = mediaTransferProgress[message.id],
+                        transferProgress = null,
                         onLongPressDelete = { msg -> messageToDelete = msg },
                         onImagePreview = { url -> previewImageUrl = url },
                         onVideoPreview = { url -> previewVideoUrl = url },

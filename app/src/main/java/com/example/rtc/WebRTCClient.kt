@@ -74,9 +74,18 @@ class WebRTCClient(
     private var shouldBeCapturing = false
     @Volatile
     private var isCapturing = false
+    @Volatile
+    private var hasReceivedFirstFrame = false
     private var lastFreezeRecoveryMs = 0L
     private var freezeRecoveryCount = 0
     private var isUsingFrontCamera = true
+    private var hasAudioFocus = false
+
+    private val firstFrameWatchdogRunnable = Runnable {
+        if (shouldBeCapturing && !hasReceivedFirstFrame) {
+            recoverFrozenOrStoppedCamera(escalateToCamera1 = true)
+        }
+    }
 
     @Volatile
     private var isRemoteDescriptionSet = false
@@ -190,12 +199,6 @@ class WebRTCClient(
             localVideoTrack?.setEnabled(true)
             if (!isCapturing) {
                 videoCapturer?.let { startCaptureSafely(it, captureWidth, captureHeight, captureFps) }
-            }
-            runOnMain {
-                localRenderer?.let { sink ->
-                    runCatching { localVideoTrack?.removeSink(sink) }
-                    runCatching { localVideoTrack?.addSink(sink) }
-                }
             }
         }
 
@@ -374,16 +377,19 @@ class WebRTCClient(
     private val cameraEventsHandler = object : CameraVideoCapturer.CameraEventsHandler {
         override fun onCameraError(errorDescription: String?) {
             isCapturing = false
+            hasReceivedFirstFrame = false
             recoverFrozenOrStoppedCamera()
         }
 
         override fun onCameraDisconnected() {
             isCapturing = false
+            hasReceivedFirstFrame = false
             recoverFrozenOrStoppedCamera()
         }
 
         override fun onCameraFreezed(errorDescription: String?) {
             isCapturing = false
+            hasReceivedFirstFrame = false
             recoverFrozenOrStoppedCamera()
         }
 
@@ -391,7 +397,9 @@ class WebRTCClient(
 
         override fun onFirstFrameAvailable() {
             isCapturing = true
+            hasReceivedFirstFrame = true
             freezeRecoveryCount = 0
+            mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
         }
 
         override fun onCameraClosed() {
@@ -399,22 +407,23 @@ class WebRTCClient(
         }
     }
 
-    private fun recoverFrozenOrStoppedCamera() {
+    private fun recoverFrozenOrStoppedCamera(escalateToCamera1: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!shouldBeCapturing || (now - lastFreezeRecoveryMs) < 1_800L) return
+        if (!shouldBeCapturing) return
+        if (!escalateToCamera1 && (now - lastFreezeRecoveryMs) < 1_800L) return
         lastFreezeRecoveryMs = now
         freezeRecoveryCount++
         mainHandler.postDelayed({
             if (!shouldBeCapturing) return@postDelayed
-            if (freezeRecoveryCount <= 1) {
+            if (!escalateToCamera1 && freezeRecoveryCount <= 1) {
                 val capturer = videoCapturer ?: return@postDelayed
                 runCatching { capturer.stopCapture() }
                 captureWidth = 640
                 captureHeight = 480
-                captureFps = 20
+                captureFps = 15
                 startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
             } else {
-                // Escalated recovery: tear down stalled capturer and rebuild (prefer Camera1 if Camera2 froze)
+                // Escalated recovery: tear down stalled capturer and rebuild (prefer Camera1 if Camera2 stalled/froze)
                 runCatching { videoCapturer?.stopCapture() }
                 runCatching { videoCapturer?.dispose() }
                 videoCapturer = null
@@ -426,7 +435,7 @@ class WebRTCClient(
                 videoCapturer = freshCapturer
                 captureWidth = 640
                 captureHeight = 480
-                captureFps = 20
+                captureFps = 15
                 isUsingFrontCamera = selection.isFront
                 surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
                 freshCapturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
@@ -446,12 +455,6 @@ class WebRTCClient(
         runCatching { capturer.stopCapture() }
         startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
         localVideoTrack?.setEnabled(true)
-        runOnMain {
-            localRenderer?.let { sink ->
-                runCatching { localVideoTrack?.removeSink(sink) }
-                runCatching { localVideoTrack?.addSink(sink) }
-            }
-        }
     }
 
     private fun createCameraCapturer(preferCamera1: Boolean = false): CapturerSelection? {
@@ -486,8 +489,8 @@ class WebRTCClient(
         val height = preferredFormat?.height ?: 480
         val maxFps = preferredFormat?.framerate?.max?.let { raw ->
             val normalized = if (raw > 1000) raw / 1000 else raw
-            normalized.coerceIn(15, 24)
-        } ?: 24
+            normalized.coerceIn(15, 20)
+        } ?: 20
 
         return CapturerSelection(
             capturer = capturer,
@@ -504,6 +507,8 @@ class WebRTCClient(
         height: Int,
         fps: Int
     ) {
+        hasReceivedFirstFrame = false
+        mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
         val started = runCatching {
             capturer.startCapture(width, height, fps)
         }.isSuccess
@@ -512,6 +517,9 @@ class WebRTCClient(
         } else {
             val fallbackStarted = runCatching { capturer.startCapture(640, 480, 15) }.isSuccess
             isCapturing = fallbackStarted
+        }
+        if (isCapturing && shouldBeCapturing) {
+            mainHandler.postDelayed(firstFrameWatchdogRunnable, 2_800L)
         }
     }
 
@@ -525,7 +533,10 @@ class WebRTCClient(
                 onCreate = { sdp ->
                     peerConnection?.setLocalDescription(
                         SimpleSdpObserver(
-                            onSet = { onLocalSdpCreated(sdp) }
+                            onSet = {
+                                if (isVideo) configureVideoSenderParameters()
+                                onLocalSdpCreated(sdp)
+                            }
                         ),
                         sdp
                     )
@@ -549,7 +560,10 @@ class WebRTCClient(
                             onCreate = { answerSdp ->
                                 peerConnection?.setLocalDescription(
                                     SimpleSdpObserver(
-                                        onSet = { onLocalSdpCreated(answerSdp) }
+                                        onSet = {
+                                            if (isVideo) configureVideoSenderParameters()
+                                            onLocalSdpCreated(answerSdp)
+                                        }
                                     ),
                                     answerSdp
                                 )
@@ -651,6 +665,8 @@ class WebRTCClient(
             }
         } else {
             isCapturing = false
+            hasReceivedFirstFrame = false
+            mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
             runCatching { videoCapturer?.stopCapture() }
         }
     }
@@ -674,25 +690,28 @@ class WebRTCClient(
 
     private fun configureAudioForCall(speakerOn: Boolean) {
         runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val attrs = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                    .setAudioAttributes(attrs)
-                    .setAcceptsDelayedFocusGain(true)
-                    .setOnAudioFocusChangeListener { }
-                    .build()
-                audioFocusRequest = req
-                audioManager.requestAudioFocus(req)
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
-                    null,
-                    AudioManager.STREAM_VOICE_CALL,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                )
+            if (!hasAudioFocus) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val attrs = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                    val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                        .setAudioAttributes(attrs)
+                        .setAcceptsDelayedFocusGain(true)
+                        .setOnAudioFocusChangeListener { }
+                        .build()
+                    audioFocusRequest = req
+                    audioManager.requestAudioFocus(req)
+                } else {
+                    @Suppress("DEPRECATION")
+                    audioManager.requestAudioFocus(
+                        null,
+                        AudioManager.STREAM_VOICE_CALL,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                    )
+                }
+                hasAudioFocus = true
             }
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isMicrophoneMute = false
@@ -725,6 +744,10 @@ class WebRTCClient(
 
     fun release() {
         shouldBeCapturing = false
+        isCapturing = false
+        hasReceivedFirstFrame = false
+        hasAudioFocus = false
+        mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
         runOnMain {
             localRenderer?.let { sink -> runCatching { localVideoTrack?.removeSink(sink) } }
             remoteRenderer?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }

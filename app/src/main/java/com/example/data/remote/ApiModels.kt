@@ -896,9 +896,16 @@ object BackendJsonParsers {
     }
 
     private fun parseSingleUser(obj: org.json.JSONObject): RemoteUserDto? {
+        val isDeleted = obj.optBoolean("isDeleted", false) ||
+            obj.optBoolean("is_deleted", false) ||
+            obj.optBoolean("deleted", false)
+        if (isDeleted) return null
+
         val uid = firstNonBlankString(obj, "userId", "user_id", "id") ?: return null
         val displayName = firstNonBlankString(obj, "displayName", "display_name", "username", "name")
         val phone = firstNonBlankString(obj, "phone", "phone_number", "phoneNumber", "mobile")
+        if (displayName.isNullOrBlank() && phone.isNullOrBlank()) return null
+
         val avatarUrl = normalizeMediaUrl(
             firstNonBlankString(obj, "avatarUrl", "avatar_url", "avatar", "photoUrl", "photo_url")
         )
@@ -922,14 +929,40 @@ object BackendJsonParsers {
             "loginDateFormatted",
             "login_date_formatted"
         )
-        val rawStatus = firstNonBlankString(obj, "status", "presence", "presenceStatus", "presence_status")
-            ?.lowercase()
+        val rawStatus = firstNonBlankString(
+            obj,
+            "status",
+            "presence",
+            "presenceStatus",
+            "presence_status",
+            "appState",
+            "app_state"
+        )?.lowercase()
+        val foregroundExplicitFalse = hasExplicitFalse(
+            obj,
+            "inForeground",
+            "isForeground",
+            "in_foreground",
+            "is_foreground",
+            "foreground"
+        )
         val isOnline = when {
-            rawStatus in setOf("offline", "disconnected", "logged_out", "inactive", "away") -> false
+            foregroundExplicitFalse -> false
+            rawStatus in setOf(
+                "offline",
+                "disconnected",
+                "logged_out",
+                "inactive",
+                "away",
+                "background",
+                "paused",
+                "stopped",
+                "locked"
+            ) -> false
             obj.has("isOnline") && !obj.isNull("isOnline") -> obj.optBoolean("isOnline", false)
             obj.has("is_online") && !obj.isNull("is_online") -> obj.optBoolean("is_online", false)
             obj.has("online") && !obj.isNull("online") -> obj.optBoolean("online", false)
-            rawStatus in setOf("online", "active", "connected") -> true
+            rawStatus in setOf("online", "active", "connected", "foreground") -> true
             else -> false
         }
         val isBlocked = obj.optBoolean("isBlocked", obj.optBoolean("is_blocked", false))
@@ -1070,8 +1103,7 @@ object BackendJsonParsers {
             liveLocationActive = liveLocationActive
         )
 
-        val rawStatus = (firstNonBlankString(obj, "status") ?: "SENT").uppercase()
-        val status = if (rawStatus == "SEEN") "READ" else rawStatus
+        val status = resolveMessageStatusFromJson(obj, fallback = "SENT")
 
         return RemoteMessageDto(
             id = id,
@@ -1135,14 +1167,48 @@ object BackendJsonParsers {
         return runCatching {
             val obj = org.json.JSONObject(trimmed)
             val nested = obj.optJSONObject("message") ?: obj.optJSONObject("data")
-            val rawStatus = firstNonBlankString(obj, "status")
-                ?: nested?.let { firstNonBlankString(it, "status") }
-            val normalized = when (rawStatus?.uppercase()) {
-                "SEEN" -> "READ"
-                else -> rawStatus?.uppercase()
+            val fromObj = resolveMessageStatusFromJson(obj, fallback = "")
+            val fromNested = nested?.let { resolveMessageStatusFromJson(it, fallback = "") } ?: ""
+            val resolved = when {
+                fromObj == "READ" || fromNested == "READ" -> "READ"
+                fromObj == "DELIVERED" || fromNested == "DELIVERED" -> "DELIVERED"
+                fromObj == "SENT" || fromNested == "SENT" -> "SENT"
+                else -> ""
             }
-            normalized?.takeIf { it in setOf("SENT", "DELIVERED", "READ") }
+            resolved.takeIf { it.isNotEmpty() }
         }.getOrNull()
+    }
+
+    private fun resolveMessageStatusFromJson(obj: org.json.JSONObject, fallback: String): String {
+        val rawStatus = (firstNonBlankString(obj, "status", "receiptStatus", "receipt_status") ?: "")
+            .trim()
+            .uppercase()
+        val isReadFlag = hasExplicitTrue(obj, "isRead", "is_read", "read", "isSeen", "is_seen", "seen") ||
+            firstNonBlankString(obj, "readAt", "read_at", "seenAt", "seen_at") != null
+        val isDeliveredFlag = hasExplicitTrue(obj, "isDelivered", "is_delivered", "delivered") ||
+            firstNonBlankString(obj, "deliveredAt", "delivered_at") != null
+        return when {
+            isReadFlag || rawStatus in setOf("READ", "SEEN", "READ_BY_PEER") -> "READ"
+            isDeliveredFlag || rawStatus in setOf("DELIVERED", "RECEIVED") -> "DELIVERED"
+            rawStatus in setOf("SENT", "OK", "SUCCESS") -> "SENT"
+            else -> fallback
+        }
+    }
+
+    private fun hasExplicitTrue(obj: org.json.JSONObject, vararg keys: String): Boolean {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            if (obj.optBoolean(key, false)) return true
+        }
+        return false
+    }
+
+    private fun hasExplicitFalse(obj: org.json.JSONObject, vararg keys: String): Boolean {
+        for (key in keys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            if (!obj.optBoolean(key, true)) return true
+        }
+        return false
     }
 
     private fun parseDoubleOpt(obj: org.json.JSONObject, vararg keys: String): Double? {

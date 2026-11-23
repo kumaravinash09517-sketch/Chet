@@ -36,7 +36,10 @@ import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -264,7 +267,24 @@ fun HomeScreen(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
                     icon = {
-                        Icon(Icons.Rounded.Chat, contentDescription = "Chats")
+                        BadgedBox(
+                            badge = {
+                                if (totalUnreadCount > 0) {
+                                    Badge(
+                                        containerColor = CrimsonAlert,
+                                        contentColor = Color.White,
+                                        modifier = Modifier.testTag("chats_tab_unread_badge")
+                                    ) {
+                                        Text(
+                                            text = if (totalUnreadCount > 99) "99+" else totalUnreadCount.toString(),
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Rounded.Chat, contentDescription = "Chats")
+                        }
                     },
                     label = {
                         Text(if (totalUnreadCount > 0) "Chats ($totalUnreadCount)" else "Chats")
@@ -365,10 +385,15 @@ fun HomeScreen(
                     )
                 } else {
                     val chatsListState = rememberLazyListState()
-                    val topPeer = filteredConversations.firstOrNull()?.peerId
-                    val topTs = filteredConversations.firstOrNull()?.lastMessageTimestamp ?: 0L
+                    val topConv = filteredConversations.firstOrNull()
+                    val topPeer = topConv?.peerId
+                    val topTs = topConv?.lastMessageTimestamp ?: 0L
+                    val topUnread = topConv?.unreadCount ?: 0
                     LaunchedEffect(topPeer, topTs) {
-                        if (searchQuery.isBlank() && chatsListState.firstVisibleItemIndex <= 1 && filteredConversations.isNotEmpty()) {
+                        if (searchQuery.isBlank() &&
+                            filteredConversations.isNotEmpty() &&
+                            (topUnread > 0 || chatsListState.firstVisibleItemIndex <= 2)
+                        ) {
                             chatsListState.animateScrollToItem(0)
                         }
                     }
@@ -630,15 +655,21 @@ private fun ConversationRow(
                     Surface(
                         shape = CircleShape,
                         color = CrimsonAlert,
-                        modifier = Modifier.testTag("unread_badge_${conversation.peerId}")
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
+                            .testTag("unread_badge_${conversation.peerId}")
                     ) {
-                        Text(
-                            text = conversation.unreadCount.toString(),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (conversation.unreadCount > 99) "99+" else conversation.unreadCount.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
                     }
                 }
             }

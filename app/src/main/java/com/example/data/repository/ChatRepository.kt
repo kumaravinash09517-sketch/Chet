@@ -410,24 +410,45 @@ class ChatRepository(
         }
     }
 
+    fun markLocalSelfPresence(online: Boolean) {
+        scope.launch {
+            val myId = sessionManager.getCurrentSession()?.userId ?: return@launch
+            userDao.updateOnlineStatus(myId, online)
+        }
+    }
+
+    suspend fun pollBackgroundMessagesForNotifications(myId: String) = withContext(Dispatchers.IO) {
+        if (myId.isBlank()) return@withContext
+        val peerIds = (
+            conversationsFlow.first().map { it.peerId } +
+                usersFlow.first()
+                    .filter { !it.userId.equals(myId, ignoreCase = true) }
+                    .map { it.userId }
+            ).distinct().take(12)
+        for (peerId in peerIds) {
+            runCatching { syncMessagesWithServer(peerId) }
+        }
+    }
+
     private fun startDirectoryAndConversationRefreshLoop() {
         directoryRefreshJob?.cancel()
         directoryRefreshJob = scope.launch {
             while (isActive) {
-                delay(15_000L)
+                val fg = signalingClient.isAppInForeground
+                delay(if (fg) 7_000L else 15_000L)
                 val myId = sessionManager.getCurrentSession()?.userId ?: continue
                 runCatching { syncUserDirectory() }
-                runCatching {
-                    val peers = conversationsFlow.first()
-                        .map { it.peerId }
-                        .ifEmpty {
-                            usersFlow.first()
-                                .filter { !it.userId.equals(myId, ignoreCase = true) }
-                                .map { it.userId }
+                if (signalingClient.isAppInForeground) {
+                    runCatching {
+                        val peers = (
+                            conversationsFlow.first().map { it.peerId } +
+                                usersFlow.first()
+                                    .filter { !it.userId.equals(myId, ignoreCase = true) }
+                                    .map { it.userId }
+                            ).distinct().take(12)
+                        for (peerId in peers) {
+                            syncMessagesWithServer(peerId)
                         }
-                        .take(5)
-                    for (peerId in peers) {
-                        syncMessagesWithServer(peerId)
                     }
                 }
             }
@@ -635,25 +656,47 @@ class ChatRepository(
                     }
                     is SignalingEvent.ReceiptUpdated -> {
                         val normStatus = when (event.status.trim().uppercase()) {
-                            "SEEN" -> "READ"
+                            "SEEN", "READ_RECEIPT" -> "READ"
                             else -> event.status.trim().uppercase()
                         }
                         val status = runCatching { MessageStatus.valueOf(normStatus) }
                             .getOrDefault(MessageStatus.DELIVERED)
+                        val targetPeerId = listOf(
+                            event.peerId,
+                            event.readerId,
+                            event.senderId,
+                            event.receiverId,
+                            event.conversationId
+                        ).firstOrNull { it.isNotBlank() && !it.equals(myId, ignoreCase = true) }
+                            ?: event.conversationId
+
                         if (event.messageId != null) {
-                            messageDao.updateMessageStatus(event.messageId, status)
-                            conversationDao.updateLastMessageStatus(
-                                event.conversationId,
-                                event.messageId,
-                                status
-                            )
-                            if (status == MessageStatus.READ) {
-                                messageDao.markMyMessagesRead(event.conversationId, myId)
-                                conversationDao.markLastMessageReadIfMine(event.conversationId)
+                            val existingMsg = messageDao.getMessageById(event.messageId)
+                            val merged = if (existingMsg != null) maxStatus(existingMsg.status, status) else status
+                            val resolvedConvId = existingMsg?.conversationId?.takeIf { it.isNotBlank() } ?: targetPeerId
+                            messageDao.updateMessageStatus(event.messageId, merged)
+                            if (resolvedConvId.isNotBlank()) {
+                                conversationDao.updateLastMessageStatus(resolvedConvId, event.messageId, merged)
+                                if (merged == MessageStatus.READ) {
+                                    messageDao.markMyMessagesRead(resolvedConvId, myId)
+                                    conversationDao.markLastMessageReadIfMine(resolvedConvId)
+                                } else if (merged == MessageStatus.DELIVERED) {
+                                    messageDao.markMyMessagesDelivered(resolvedConvId, myId)
+                                    conversationDao.markLastMessageDeliveredIfMine(resolvedConvId)
+                                }
                             }
-                        } else if (status == MessageStatus.READ) {
-                            messageDao.markMyMessagesRead(event.conversationId, myId)
-                            conversationDao.markLastMessageReadIfMine(event.conversationId)
+                        } else if (targetPeerId.isNotBlank()) {
+                            when (status) {
+                                MessageStatus.READ -> {
+                                    messageDao.markMyMessagesRead(targetPeerId, myId)
+                                    conversationDao.markLastMessageReadIfMine(targetPeerId)
+                                }
+                                MessageStatus.DELIVERED -> {
+                                    messageDao.markMyMessagesDelivered(targetPeerId, myId)
+                                    conversationDao.markLastMessageDeliveredIfMine(targetPeerId)
+                                }
+                                else -> Unit
+                            }
                         }
                     }
                     is SignalingEvent.TypingStatusChanged -> {
@@ -878,7 +921,7 @@ class ChatRepository(
                 avatarUrl = resolvedAvatar,
                 lastLoginMillis = now,
                 lastLoginFormatted = formatted,
-                isOnline = true
+                isOnline = signalingClient.isAppInForeground
             )
         )
 
@@ -1026,7 +1069,7 @@ class ChatRepository(
                         avatarUrl = resolvedAvatar,
                         lastLoginMillis = now,
                         lastLoginFormatted = formatted,
-                        isOnline = true
+                        isOnline = signalingClient.isAppInForeground
                     )
                 )
 
@@ -1167,7 +1210,7 @@ class ChatRepository(
                     avatarUrl = resolvedAvatar,
                     lastLoginMillis = now,
                     lastLoginFormatted = formatted,
-                    isOnline = true
+                    isOnline = signalingClient.isAppInForeground
                 )
             )
 
@@ -1193,11 +1236,14 @@ class ChatRepository(
     }
 
     private fun RemoteUserDto.toUserEntity(): UserEntity? {
-        val uid = resolvedUserId()
-        if (uid.isBlank()) return null
+        val uid = resolvedUserId().trim()
+        if (uid.isBlank() || uid.equals("null", ignoreCase = true)) return null
+        val rawName = resolvedDisplayName().trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+        val rawPhone = resolvedPhone().trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+        if (rawName.isBlank() && rawPhone.isBlank()) return null
+
         val rawMillis = resolvedLastLoginMillis()
         val millis = if (rawMillis > 0L) rawMillis else System.currentTimeMillis()
-        val rawPhone = resolvedPhone()
         val formattedPhone = if (rawPhone.isNotBlank()) {
             PhoneAuthUtils.normalizePhoneNumber(rawPhone).ifBlank { rawPhone }
         } else {
@@ -1205,7 +1251,7 @@ class ChatRepository(
         }
         return UserEntity(
             userId = uid,
-            displayName = resolvedDisplayName().ifBlank { uid },
+            displayName = rawName.ifBlank { uid },
             phone = formattedPhone,
             avatarUrl = resolvedAvatarUrl(),
             lastLoginMillis = millis,
@@ -1261,6 +1307,13 @@ class ChatRepository(
                 val mergedUsers = mergedMap.values.toList()
                 if (mergedUsers.isNotEmpty()) {
                     userDao.upsertUsers(mergedUsers)
+                    if (remoteUsers.isNotEmpty()) {
+                        val activeLowerIds = mergedMap.keys.toList()
+                        if (activeLowerIds.isNotEmpty()) {
+                            userDao.deleteUsersNotIn(activeLowerIds)
+                            conversationDao.deleteEmptyConversationsNotIn(activeLowerIds)
+                        }
+                    }
                     mergedUsers.forEach { user ->
                         val existing = conversationDao.getConversation(user.userId)
                         if (existing != null &&
@@ -1404,18 +1457,23 @@ class ChatRepository(
                     }
 
                     val latest = entities.maxByOrNull { it.timestamp }
+                    val app = context.applicationContext as? HelloSirApplication
+                    val isViewingThisChat = app != null &&
+                        app.isUiInForeground &&
+                        app.activeChatPeerId.equals(peerId, ignoreCase = true)
+                    val updatedUnread = if (isViewingThisChat) {
+                        0
+                    } else {
+                        (prevConv?.unreadCount ?: 0) + newlyReceivedFromPeer.size
+                    }
                     if (latest != null) {
                         val existing = conversationDao.getConversation(peerId)
                         val peerUser = userDao.getUser(peerId)
-                        val app = context.applicationContext as? HelloSirApplication
-                        val isViewingThisChat = app != null &&
-                            app.isUiInForeground &&
-                            app.activeChatPeerId.equals(peerId, ignoreCase = true)
-                        val updatedUnread = if (isViewingThisChat) {
-                            0
-                        } else {
-                            (existing?.unreadCount ?: 0) + newlyReceivedFromPeer.size
-                        }
+                        val newestTimestamp = maxOf(
+                            latest.timestamp,
+                            newlyReceivedFromPeer.maxOfOrNull { it.timestamp } ?: 0L,
+                            existing?.lastMessageTimestamp ?: 0L
+                        )
                         conversationDao.upsertConversation(
                             ConversationEntity(
                                 peerId = peerId,
@@ -1426,13 +1484,28 @@ class ChatRepository(
                                 lastMessageId = latest.id,
                                 lastMessagePreview = previewForMessage(latest),
                                 lastMessageType = latest.type,
-                                lastMessageTimestamp = maxOf(latest.timestamp, existing?.lastMessageTimestamp ?: 0L),
+                                lastMessageTimestamp = newestTimestamp,
                                 lastMessageStatus = latest.status,
                                 lastMessageIsMine = latest.senderId.equals(myId, ignoreCase = true),
                                 unreadCount = updatedUnread,
                                 isPeerTyping = existing?.isPeerTyping ?: false
                             )
                         )
+                    }
+
+                    if (newlyReceivedFromPeer.isNotEmpty()) {
+                        val receiptStatus = if (isViewingThisChat) MessageStatus.READ.name else MessageStatus.DELIVERED.name
+                        newlyReceivedFromPeer.forEach { msg ->
+                            signalingClient.sendReceipt(
+                                senderId = myId,
+                                receiverId = peerId,
+                                messageId = msg.id,
+                                status = receiptStatus
+                            )
+                        }
+                        if (isViewingThisChat) {
+                            runCatching { apiService.markConversationRead(peerId, myId) }
+                        }
                     }
 
                     newlyReceivedFromPeer.maxByOrNull { it.timestamp }?.let { newest ->
@@ -1442,7 +1515,8 @@ class ChatRepository(
                             message = newest,
                             peerId = peerId,
                             senderName = resolvedName,
-                            headline = previewForMessage(newest)
+                            headline = previewForMessage(newest),
+                            unreadCount = updatedUnread.coerceAtLeast(1)
                         )
                     }
                 }
@@ -1878,7 +1952,8 @@ class ChatRepository(
                 message = entity,
                 peerId = peerId,
                 senderName = resolvedPeerName,
-                headline = headline
+                headline = headline,
+                unreadCount = newUnread.coerceAtLeast(1)
             )
             signalingClient.sendReceipt(
                 senderId = myId,
@@ -1896,7 +1971,8 @@ class ChatRepository(
         message: MessageEntity,
         peerId: String,
         senderName: String,
-        headline: String
+        headline: String,
+        unreadCount: Int = 1
     ) {
         if (!notifiedMessageIds.add(message.id)) return
         while (notifiedMessageIds.size > 400) {
@@ -1922,7 +1998,8 @@ class ChatRepository(
             context = context,
             senderId = peerId,
             senderName = senderName,
-            preview = headline
+            preview = headline,
+            unreadCount = unreadCount
         )
     }
 
@@ -2106,14 +2183,14 @@ class ChatRepository(
                 var lastEmitMs = 0L
                 body.byteStream().use { input ->
                     FileOutputStream(tempFile).use { output ->
-                        val buffer = ByteArray(16 * 1024)
+                        val buffer = ByteArray(64 * 1024)
                         while (true) {
                             val read = input.read(buffer)
                             if (read <= 0) break
                             output.write(buffer, 0, read)
                             downloaded += read
                             val now = System.currentTimeMillis()
-                            if (now - lastEmitMs >= 100L || (totalBytes > 0L && downloaded >= totalBytes)) {
+                            if (now - lastEmitMs >= 220L || (totalBytes > 0L && downloaded >= totalBytes)) {
                                 lastEmitMs = now
                                 MediaTransferTracker.update(
                                     MediaTransferTracker.computeProgress(
@@ -2191,7 +2268,7 @@ class ChatRepository(
             val startMs = System.currentTimeMillis()
             var uploaded = 0L
             var lastEmitMs = 0L
-            val buffer = ByteArray(16 * 1024)
+            val buffer = ByteArray(64 * 1024)
             FileInputStream(file).use { input ->
                 while (true) {
                     val read = input.read(buffer)
@@ -2199,7 +2276,7 @@ class ChatRepository(
                     sink.write(buffer, 0, read)
                     uploaded += read
                     val now = System.currentTimeMillis()
-                    if (now - lastEmitMs >= 100L || uploaded >= total) {
+                    if (now - lastEmitMs >= 220L || uploaded >= total) {
                         lastEmitMs = now
                         MediaTransferTracker.update(
                             MediaTransferTracker.computeProgress(
@@ -2255,7 +2332,7 @@ class ChatRepository(
 
             input.use { src ->
                 FileOutputStream(dest).use { out ->
-                    src.copyTo(out, bufferSize = 16 * 1024)
+                    src.copyTo(out, bufferSize = 64 * 1024)
                     out.flush()
                 }
             }

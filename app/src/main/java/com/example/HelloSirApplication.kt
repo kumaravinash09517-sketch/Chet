@@ -1,7 +1,10 @@
 package com.example
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -36,6 +39,18 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
     @Volatile
     var activeChatPeerId: String? = null
 
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    isUiInForeground = false
+                    signalingClient.setAppForeground(false)
+                    chatRepository.markLocalSelfPresence(false)
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.createChannels(this)
@@ -59,6 +74,16 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
         )
         contactSyncHelper = ContactSyncHelper(this)
         locationHelper = LocationHelper(this)
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenStateReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(screenStateReceiver, filter)
+        }
     }
 
     override fun newImageLoader(): ImageLoader {

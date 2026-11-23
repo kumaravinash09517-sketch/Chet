@@ -34,6 +34,9 @@ interface UserDao {
 
     @Query("UPDATE users SET isOnline = 0")
     suspend fun clearAllOnlineStatuses()
+
+    @Query("DELETE FROM users WHERE LOWER(userId) NOT IN (:activeLowerIds)")
+    suspend fun deleteUsersNotIn(activeLowerIds: List<String>)
 }
 
 @Dao
@@ -70,10 +73,19 @@ interface ConversationDao {
     suspend fun updateLastMessageStatus(peerId: String, messageId: String, status: MessageStatus)
 
     @Query(
+        "UPDATE conversations SET lastMessageStatus = 'DELIVERED' " +
+            "WHERE peerId = :peerId AND lastMessageIsMine = 1 AND lastMessageStatus IN ('PENDING', 'SENT')"
+    )
+    suspend fun markLastMessageDeliveredIfMine(peerId: String)
+
+    @Query(
         "UPDATE conversations SET lastMessageStatus = 'READ' " +
             "WHERE peerId = :peerId AND lastMessageIsMine = 1"
     )
     suspend fun markLastMessageReadIfMine(peerId: String)
+
+    @Query("DELETE FROM conversations WHERE lastMessageId IS NULL AND LOWER(peerId) NOT IN (:activeLowerIds)")
+    suspend fun deleteEmptyConversationsNotIn(activeLowerIds: List<String>)
 
     @Query("DELETE FROM conversations")
     suspend fun clearAll()
@@ -116,6 +128,15 @@ interface MessageDao {
         conversationId: String,
         myUserId: String,
         status: MessageStatus = MessageStatus.READ
+    )
+
+    @Query(
+        "UPDATE messages SET status = 'DELIVERED' " +
+            "WHERE conversationId = :conversationId AND senderId = :myUserId AND status IN ('PENDING', 'SENT')"
+    )
+    suspend fun markMyMessagesDelivered(
+        conversationId: String,
+        myUserId: String
     )
 
     @Query(

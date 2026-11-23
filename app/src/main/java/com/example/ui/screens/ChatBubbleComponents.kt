@@ -71,14 +71,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
 import com.example.data.remote.BackendJsonParsers
 import com.example.data.repository.MediaTransferProgress
+import com.example.data.repository.MediaTransferTracker
 import com.example.ui.theme.IncomingBubbleDark
 import com.example.ui.theme.IncomingBubbleLight
 import com.example.ui.theme.OnlineGreen
@@ -363,6 +367,13 @@ private fun VideoPreviewCard(
     onPlay: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val trackedProgress by remember(messageId) {
+        MediaTransferTracker.transfers
+            .map { it[messageId] }
+            .distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = transferProgress)
+    val activeProgress = trackedProgress ?: transferProgress
+
     var thumbnail by remember(sourceUri, localUri) {
         mutableStateOf(
             localUri?.let { VideoThumbnailCache.get(it) }
@@ -371,36 +382,48 @@ private fun VideoPreviewCard(
     }
     var thumbnailFailed by remember(sourceUri, localUri) { mutableStateOf(false) }
 
-    LaunchedEffect(messageId, localUri, remoteUrl, transferProgress == null) {
-        if (!isMine && localUri.isNullOrBlank() && !remoteUrl.isNullOrBlank() && transferProgress == null) {
+    LaunchedEffect(messageId, localUri, remoteUrl) {
+        if (!isMine && localUri.isNullOrBlank() && !remoteUrl.isNullOrBlank()) {
             onEnsureDownloaded()
         }
     }
 
     LaunchedEffect(sourceUri, localUri) {
-        val candidateUris = listOfNotNull(
+        val localCandidates = listOfNotNull(
             localUri?.takeIf { it.isNotBlank() },
-            sourceUri?.takeIf { it.isNotBlank() }
+            sourceUri?.takeIf {
+                it.isNotBlank() &&
+                    !it.startsWith("http://", ignoreCase = true) &&
+                    !it.startsWith("https://", ignoreCase = true)
+            }
         ).distinct()
-        if (candidateUris.isEmpty() || thumbnail != null) return@LaunchedEffect
+        if (localCandidates.isEmpty() || thumbnail != null) return@LaunchedEffect
 
         val loaded = withContext(Dispatchers.IO) {
             var frame: Bitmap? = null
-            for (candidate in candidateUris) {
+            for (candidate in localCandidates) {
+                val filePath = if (candidate.startsWith("file://")) Uri.parse(candidate).path else null
+                if (filePath != null && !File(filePath).exists()) continue
                 val retriever = MediaMetadataRetriever()
                 try {
-                    if (candidate.startsWith("http://", ignoreCase = true) ||
-                        candidate.startsWith("https://", ignoreCase = true)
-                    ) {
-                        retriever.setDataSource(candidate, emptyMap())
-                    } else {
-                        retriever.setDataSource(context, Uri.parse(candidate))
-                    }
-                    frame = retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    retriever.setDataSource(context, Uri.parse(candidate))
+                    val raw = retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                         ?: retriever.getFrameAtTime()
-                    if (frame != null) break
+                    if (raw != null) {
+                        frame = if (raw.width > 640) {
+                            val targetW = 640
+                            val targetH = ((raw.height.toFloat() / raw.width.toFloat()) * targetW)
+                                .toInt().coerceAtLeast(1)
+                            val scaled = Bitmap.createScaledBitmap(raw, targetW, targetH, true)
+                            if (scaled !== raw) raw.recycle()
+                            scaled
+                        } else {
+                            raw
+                        }
+                        break
+                    }
                 } catch (_: Throwable) {
-                    // Try next candidate URI
+                    // Try next local candidate URI
                 } finally {
                     runCatching { retriever.release() }
                 }
@@ -408,7 +431,7 @@ private fun VideoPreviewCard(
             frame
         }
         if (loaded != null) {
-            candidateUris.forEach { VideoThumbnailCache.put(it, loaded) }
+            localCandidates.forEach { VideoThumbnailCache.put(it, loaded) }
             thumbnail = loaded
             thumbnailFailed = false
         } else {
@@ -416,7 +439,7 @@ private fun VideoPreviewCard(
         }
     }
 
-    val isTransferring = transferProgress != null
+    val isTransferring = activeProgress != null
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
@@ -470,7 +493,7 @@ private fun VideoPreviewCard(
 
                 // Center Play / Transfer Progress Badge
                 if (isTransferring) {
-                    val progress = transferProgress!!
+                    val progress = activeProgress!!
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = Color.Black.copy(alpha = 0.72f),
@@ -558,7 +581,7 @@ private fun VideoPreviewCard(
                     )
                     Text(
                         text = when {
-                            isTransferring -> transferProgress!!.statusLabel
+                            isTransferring -> activeProgress!!.statusLabel
                             sourceUri == null -> "Preparing video…"
                             thumbnailFailed && localUri.isNullOrBlank() && !isMine -> "$subtitle • Tap to play / cache"
                             else -> "$subtitle • Tap to play fullscreen"

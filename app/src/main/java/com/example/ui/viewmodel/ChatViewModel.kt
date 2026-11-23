@@ -91,8 +91,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             periodicSyncJob?.cancel()
             periodicSyncJob = viewModelScope.launch {
                 while (isActive) {
-                    val wsUp = app.signalingClient.isConnected.value
-                    delay(if (wsUp) 10_000L else 4_000L)
+                    delay(3_500L)
                     repository.retryPendingMessages(peerId)
                     repository.syncMessagesWithServer(peerId)
                 }

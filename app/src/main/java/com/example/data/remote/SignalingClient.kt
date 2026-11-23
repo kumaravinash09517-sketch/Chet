@@ -32,7 +32,11 @@ sealed interface SignalingEvent {
     data class ReceiptUpdated(
         val messageId: String?,
         val conversationId: String,
-        val status: String
+        val status: String,
+        val peerId: String = "",
+        val senderId: String = "",
+        val receiverId: String = "",
+        val readerId: String = ""
     ) : SignalingEvent
 
     data class TypingStatusChanged(val userId: String, val isTyping: Boolean) : SignalingEvent
@@ -100,6 +104,7 @@ class SignalingClient(
     private var webSocket: WebSocket? = null
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var backgroundDisconnectJob: Job? = null
     private val shouldStayConnected = AtomicBoolean(false)
     private var reconnectAttempt = 0
 
@@ -110,10 +115,37 @@ class SignalingClient(
     fun setAppForeground(inForeground: Boolean) {
         val changed = isAppInForeground != inForeground
         isAppInForeground = inForeground
-        if (_isConnected.value && changed) {
-            scope.launch {
-                val session = sessionManager.getCurrentSession() ?: return@launch
-                sendPresenceFrame(session.userId, inForeground)
+        if (inForeground) {
+            backgroundDisconnectJob?.cancel()
+            backgroundDisconnectJob = null
+            shouldStayConnected.set(true)
+            if (_isConnected.value && webSocket != null) {
+                if (changed) {
+                    scope.launch {
+                        val session = sessionManager.getCurrentSession() ?: return@launch
+                        sendPresenceFrame(session.userId, true)
+                    }
+                }
+            } else {
+                openSocket()
+            }
+        } else {
+            shouldStayConnected.set(false)
+            reconnectJob?.cancel()
+            heartbeatJob?.cancel()
+            backgroundDisconnectJob?.cancel()
+            backgroundDisconnectJob = scope.launch {
+                val userId = sessionManager.getCurrentSession()?.userId.orEmpty()
+                if (userId.isNotBlank() && webSocket != null) {
+                    sendPresenceFrame(userId, false)
+                    delay(70L)
+                }
+                if (!isAppInForeground) {
+                    closeSocketCleanly("App moved to background")
+                    if (userId.isNotBlank()) {
+                        _events.tryEmit(SignalingEvent.PresenceChanged(userId, false))
+                    }
+                }
             }
         }
     }
@@ -126,20 +158,30 @@ class SignalingClient(
                 put("isOnline", online)
                 put("is_online", online)
                 put("online", online)
+                put("inForeground", online)
+                put("isForeground", online)
+                put("foreground", online)
+                put("appState", if (online) "foreground" else "background")
                 put("status", if (online) "online" else "offline")
                 put("timestamp", System.currentTimeMillis())
             }
         )
     }
 
-    fun connect() {
+    fun connect(forceDuringCall: Boolean = false) {
+        if (!forceDuringCall && !isAppInForeground) {
+            return
+        }
+        backgroundDisconnectJob?.cancel()
+        backgroundDisconnectJob = null
         shouldStayConnected.set(true)
         if (_isConnected.value && webSocket != null) return
-        openSocket()
+        openSocket(forceDuringCall = forceDuringCall)
     }
 
     suspend fun sendPresenceAndDisconnect(userId: String) {
         isAppInForeground = false
+        backgroundDisconnectJob?.cancel()
         if (userId.isNotBlank()) {
             sendPresenceFrame(userId, false)
             sendRaw(
@@ -148,6 +190,7 @@ class SignalingClient(
                     put("userId", userId)
                     put("user_id", userId)
                     put("isOnline", false)
+                    put("inForeground", false)
                     put("status", "offline")
                 }
             )
@@ -158,9 +201,14 @@ class SignalingClient(
 
     fun disconnect() {
         shouldStayConnected.set(false)
+        backgroundDisconnectJob?.cancel()
         reconnectJob?.cancel()
         heartbeatJob?.cancel()
-        webSocket?.close(1000, "User disconnected")
+        closeSocketCleanly("User disconnected")
+    }
+
+    private fun closeSocketCleanly(reason: String) {
+        webSocket?.close(1000, reason)
         webSocket = null
         _isConnected.value = false
     }
@@ -169,8 +217,10 @@ class SignalingClient(
         _events.tryEmit(event)
     }
 
-    private fun openSocket() {
+    private fun openSocket(forceDuringCall: Boolean = false) {
         scope.launch {
+            if (!shouldStayConnected.get()) return@launch
+            if (!forceDuringCall && !isAppInForeground) return@launch
             val session = sessionManager.getCurrentSession() ?: return@launch
             val wsUrl = "${NetworkModule.WS_URL}?userId=${Uri.encode(session.userId)}&deviceLockId=${Uri.encode(session.deviceLockId)}"
             val request = Request.Builder()
@@ -250,13 +300,13 @@ class SignalingClient(
     }
 
     private fun scheduleReconnect() {
-        if (!shouldStayConnected.get()) return
+        if (!shouldStayConnected.get() || !isAppInForeground) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             reconnectAttempt++
             val backoffMs = (1500L * reconnectAttempt).coerceAtMost(15_000L)
             delay(backoffMs)
-            if (shouldStayConnected.get()) {
+            if (shouldStayConnected.get() && isAppInForeground) {
                 openSocket()
             }
         }
@@ -298,18 +348,19 @@ class SignalingClient(
                 "receipt", "read_receipt", "delivered_receipt", "seen" -> {
                     val messageId = firstNonBlank(data, "messageId", "message_id", "msgId", "msg_id")
                         ?: firstNonBlank(json, "messageId", "message_id")
-                    val convId = firstNonBlank(
-                        data,
-                        "peerId",
-                        "peer_id",
-                        "senderId",
-                        "sender_id",
-                        "from",
-                        "readerId",
-                        "reader_id",
-                        "userId",
-                        "user_id"
-                    ) ?: firstNonBlank(json, "peerId", "senderId", "sender_id", "from") ?: ""
+                    val peerId = firstNonBlank(data, "peerId", "peer_id", "conversationId", "conversation_id")
+                        ?: firstNonBlank(json, "peerId", "peer_id", "conversationId", "conversation_id")
+                        ?: ""
+                    val senderId = firstNonBlank(data, "senderId", "sender_id", "from")
+                        ?: firstNonBlank(json, "senderId", "sender_id", "from")
+                        ?: ""
+                    val receiverId = firstNonBlank(data, "receiverId", "receiver_id", "to")
+                        ?: firstNonBlank(json, "receiverId", "receiver_id", "to")
+                        ?: ""
+                    val readerId = firstNonBlank(data, "readerId", "reader_id", "userId", "user_id")
+                        ?: firstNonBlank(json, "readerId", "reader_id", "userId", "user_id")
+                        ?: ""
+                    val convId = peerId.ifBlank { readerId }.ifBlank { senderId }.ifBlank { receiverId }
                     val defaultStatus = when (rawEventType.trim().lowercase()) {
                         "delivered_receipt" -> "DELIVERED"
                         else -> "READ"
@@ -318,7 +369,17 @@ class SignalingClient(
                         .uppercase()
                     val status = if (rawStatus == "SEEN") "READ" else rawStatus
                     if (convId.isNotBlank()) {
-                        _events.tryEmit(SignalingEvent.ReceiptUpdated(messageId, convId, status))
+                        _events.tryEmit(
+                            SignalingEvent.ReceiptUpdated(
+                                messageId = messageId,
+                                conversationId = convId,
+                                status = status,
+                                peerId = peerId,
+                                senderId = senderId,
+                                receiverId = receiverId,
+                                readerId = readerId
+                            )
+                        )
                     }
                 }
                 "typing" -> {
@@ -336,15 +397,21 @@ class SignalingClient(
                     val userId = firstNonBlank(data, "userId", "user_id", "id")
                         ?: firstNonBlank(json, "userId", "user_id", "id")
                         ?: ""
-                    val statusStr = firstNonBlank(data, "status", "presence", "state")?.lowercase()
+                    val statusStr = firstNonBlank(data, "status", "presence", "state", "appState", "app_state")
+                        ?.lowercase()
+                    val foregroundExplicitFalse = (data.has("inForeground") && !data.isNull("inForeground") && !data.optBoolean("inForeground", true)) ||
+                        (data.has("isForeground") && !data.isNull("isForeground") && !data.optBoolean("isForeground", true)) ||
+                        (data.has("in_foreground") && !data.isNull("in_foreground") && !data.optBoolean("in_foreground", true)) ||
+                        (data.has("foreground") && !data.isNull("foreground") && !data.optBoolean("foreground", true))
                     val online = when {
                         eventKey == "user_offline" || eventKey == "user_disconnected" -> false
+                        foregroundExplicitFalse -> false
+                        statusStr in setOf("offline", "disconnected", "logged_out", "inactive", "away", "background", "paused", "stopped", "locked") -> false
                         eventKey == "user_online" -> true
-                        statusStr in setOf("offline", "disconnected", "logged_out", "inactive") -> false
                         data.has("isOnline") && !data.isNull("isOnline") -> data.optBoolean("isOnline", false)
                         data.has("is_online") && !data.isNull("is_online") -> data.optBoolean("is_online", false)
                         data.has("online") && !data.isNull("online") -> data.optBoolean("online", false)
-                        statusStr in setOf("online", "active", "connected") -> true
+                        statusStr in setOf("online", "active", "connected", "foreground") -> true
                         else -> false
                     }
                     if (userId.isNotBlank()) {

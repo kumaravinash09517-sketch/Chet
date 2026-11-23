@@ -102,7 +102,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.sessionFlow.collect { session ->
                 _authResolved.value = true
                 if (session != null) {
-                    app.signalingClient.connect()
+                    if (app.isUiInForeground) {
+                        app.signalingClient.setAppForeground(true)
+                    }
                     app.startBackgroundSignalingService()
                     refreshDirectory()
                 }
