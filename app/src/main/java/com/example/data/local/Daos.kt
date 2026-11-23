@@ -172,3 +172,39 @@ interface MessageDao {
     @Query("DELETE FROM messages")
     suspend fun clearAll()
 }
+
+@Dao
+interface StatusDao {
+    @Query("SELECT * FROM status_updates WHERE expiresAt > :nowMillis ORDER BY createdAt DESC")
+    fun observeActiveStatuses(nowMillis: Long): Flow<List<StatusUpdateEntity>>
+
+    @Query("SELECT * FROM status_updates ORDER BY createdAt DESC")
+    fun observeAllStatuses(): Flow<List<StatusUpdateEntity>>
+
+    @Query("SELECT * FROM status_updates WHERE id = :statusId LIMIT 1")
+    suspend fun getStatusById(statusId: String): StatusUpdateEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertStatus(status: StatusUpdateEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertStatuses(statuses: List<StatusUpdateEntity>)
+
+    @Query("UPDATE status_updates SET isViewedByMe = 1 WHERE id = :statusId")
+    suspend fun markViewed(statusId: String)
+
+    @Query("UPDATE status_updates SET viewCount = :viewCount WHERE id = :statusId AND viewCount < :viewCount")
+    suspend fun updateViewCountIfHigher(statusId: String, viewCount: Int)
+
+    @Query("UPDATE status_updates SET localUri = :localUri WHERE id = :statusId")
+    suspend fun updateLocalUri(statusId: String, localUri: String)
+
+    @Query("DELETE FROM status_updates WHERE id = :statusId")
+    suspend fun deleteStatus(statusId: String)
+
+    @Query("DELETE FROM status_updates WHERE expiresAt <= :nowMillis")
+    suspend fun deleteExpiredStatuses(nowMillis: Long)
+
+    @Query("DELETE FROM status_updates")
+    suspend fun clearAll()
+}

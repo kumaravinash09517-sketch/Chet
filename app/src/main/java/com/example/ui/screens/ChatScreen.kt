@@ -93,6 +93,10 @@ fun ChatScreen(
     peerId: String,
     peerName: String,
     peerIsOnline: Boolean = false,
+    peerPhone: String = "",
+    peerBio: String = "",
+    peerAvatarUrl: String? = null,
+    peerLastSeen: String = "",
     myUserId: String,
     messages: List<MessageEntity>,
     mediaTransferProgress: Map<String, MediaTransferProgress> = emptyMap(),
@@ -122,6 +126,7 @@ fun ChatScreen(
     var pendingCallIsVideo by remember { mutableStateOf<Boolean?>(null) }
     var showLocationRationale by remember { mutableStateOf(false) }
     var showCallPermRationale by remember { mutableStateOf(false) }
+    var showPeerInfoSheet by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
 
@@ -235,20 +240,19 @@ fun ChatScreen(
                     }
                 },
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = peerName.take(1).uppercase(),
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { showPeerInfoSheet = true }
+                            .padding(vertical = 2.dp, horizontal = 4.dp)
+                            .testTag("chat_peer_header")
+                    ) {
+                        UserAvatarCircle(
+                            name = peerName,
+                            avatarUrl = peerAvatarUrl,
+                            sizeDp = 38
+                        )
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
@@ -412,7 +416,7 @@ fun ChatScreen(
                     ChatMessageBubble(
                         message = message,
                         isMine = message.senderId == myUserId,
-                        transferProgress = null,
+                        transferProgress = mediaTransferProgress[message.id],
                         onLongPressDelete = { msg -> messageToDelete = msg },
                         onImagePreview = { url -> previewImageUrl = url },
                         onVideoPreview = { url -> previewVideoUrl = url },
@@ -703,6 +707,101 @@ fun ChatScreen(
                 TextButton(onClick = { showCallPermRationale = false }) { Text("Cancel") }
             }
         )
+    }
+
+    if (showPeerInfoSheet) {
+        ModalBottomSheet(onDismissRequest = { showPeerInfoSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                UserAvatarCircle(
+                    name = peerName,
+                    avatarUrl = peerAvatarUrl,
+                    sizeDp = 76
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = peerName,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "@$peerId",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = when {
+                        peerIsOnline -> "Online"
+                        peerLastSeen.isNotBlank() -> "Offline • Last seen: $peerLastSeen"
+                        else -> "Offline"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (peerIsOnline) OnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "About",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = peerBio.ifBlank { "Hey there! I am using Hello Sir." },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (peerPhone.isNotBlank()) {
+                            Text(
+                                text = "Phone: $peerPhone",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = {
+                            showPeerInfoSheet = false
+                            requestCallPermissionsOrStart(isVideo = false)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Audio Call")
+                    }
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            showPeerInfoSheet = false
+                            requestCallPermissionsOrStart(isVideo = true)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Rounded.Videocam, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Video Call")
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -18,23 +18,29 @@ import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageStatus
 import com.example.data.local.MessageType
+import com.example.data.local.StatusType
+import com.example.data.local.StatusUpdateEntity
 import com.example.data.local.UserEntity
 import com.example.data.remote.AdminWebhookEventRequest
 import com.example.data.remote.ApiService
 import com.example.data.remote.BackendJsonParsers
 import com.example.data.remote.CallSignalRequest
+import com.example.data.remote.CreateStatusRequest
 import com.example.data.remote.DirectLoginRequest
 import com.example.data.remote.IceServerDto
 import com.example.data.remote.NetworkModule
 import com.example.data.remote.RegisterUserRequest
 import com.example.data.remote.RemoteCallSignalDto
 import com.example.data.remote.RemoteMessageDto
+import com.example.data.remote.RemoteStatusDto
 import com.example.data.remote.RemoteUserDto
 import com.example.data.remote.SendMessageRequest
 import com.example.data.remote.SendOtpRequest
 import com.example.data.remote.SendOtpResponse
 import com.example.data.remote.SignalingClient
 import com.example.data.remote.SignalingEvent
+import com.example.data.remote.StatusViewRequest
+import com.example.data.remote.UpdateProfileRequest
 import com.example.data.remote.VerifyOtpRequest
 import com.example.data.remote.VerifyOtpResponse
 import com.example.platform.NotificationHelper
@@ -50,6 +56,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -344,6 +351,7 @@ class ChatRepository(
     private val userDao = database.userDao()
     private val conversationDao = database.conversationDao()
     private val messageDao = database.messageDao()
+    private val statusDao = database.statusDao()
 
     private var callPollingJob: Job? = null
     private var directoryRefreshJob: Job? = null
@@ -362,6 +370,11 @@ class ChatRepository(
     val conversationsFlow: Flow<List<ConversationEntity>> = conversationDao.observeConversations()
     val usersFlow: Flow<List<UserEntity>> = userDao.observeAllUsers()
     val totalUnreadCountFlow: Flow<Int?> = conversationDao.observeTotalUnreadCount()
+    val statusesFlow: Flow<List<StatusUpdateEntity>> = statusDao.observeAllStatuses()
+        .map { list ->
+            val now = System.currentTimeMillis()
+            list.filter { it.expiresAt > now }
+        }
     val mediaTransferProgress: StateFlow<Map<String, MediaTransferProgress>> = MediaTransferTracker.transfers
 
     init {
@@ -450,6 +463,7 @@ class ChatRepository(
                 val myId = sessionManager.getCurrentSession()?.userId ?: continue
                 runCatching { syncUserDirectory() }
                 if (signalingClient.isAppInForeground) {
+                    runCatching { syncStatuses() }
                     runCatching {
                         val peers = (
                             conversationsFlow.first().map { it.peerId } +
@@ -652,12 +666,50 @@ class ChatRepository(
                 when (event) {
                     is SignalingEvent.SocketConnected -> {
                         syncUserDirectory()
+                        syncStatuses()
                         retryPendingMessages()
                         pollIncomingCallsOnce(includeActiveCalls = true)
                         launch { fetchIceServers() }
                     }
                     is SignalingEvent.DirectoryUpdated -> {
                         syncUserDirectory()
+                    }
+                    is SignalingEvent.ProfileUpdated -> {
+                        val existing = userDao.getUser(event.userId)
+                        if (existing != null) {
+                            userDao.upsertUser(
+                                existing.copy(
+                                    displayName = event.displayName.ifBlank { existing.displayName },
+                                    bio = event.bio.ifBlank { existing.bio },
+                                    avatarUrl = event.avatarUrl ?: existing.avatarUrl
+                                )
+                            )
+                        }
+                        val conv = conversationDao.getConversation(event.userId)
+                        if (conv != null) {
+                            conversationDao.upsertConversation(
+                                conv.copy(
+                                    peerName = event.displayName.ifBlank { conv.peerName },
+                                    peerAvatarUrl = event.avatarUrl ?: conv.peerAvatarUrl
+                                )
+                            )
+                        }
+                    }
+                    is SignalingEvent.StatusUpdateReceived -> {
+                        val entity = event.dto.toEntity(myId)
+                        statusDao.upsertStatus(entity)
+                        if (entity.type == StatusType.VIDEO && !entity.mediaUrl.isNullOrBlank()) {
+                            scope.launch { ensureStatusVideoDownloaded(entity) }
+                        }
+                    }
+                    is SignalingEvent.StatusDeleted -> {
+                        statusDao.deleteStatus(event.statusId)
+                    }
+                    is SignalingEvent.StatusViewed -> {
+                        val existing = statusDao.getStatusById(event.statusId)
+                        if (existing != null && !event.viewerId.equals(existing.userId, ignoreCase = true)) {
+                            statusDao.updateViewCountIfHigher(event.statusId, existing.viewCount + 1)
+                        }
                     }
                     is SignalingEvent.ChatMessageReceived -> {
                         handleIncomingMessage(event.dto, myId)
@@ -1063,6 +1115,7 @@ class ChatRepository(
                 }
 
                 val resolvedAvatar = body?.resolvedAvatarUrl() ?: BackendJsonParsers.normalizeMediaUrl(avatarUrl)
+                val resolvedBio = body?.resolvedBio()?.takeIf { it.isNotBlank() } ?: UserSession.DEFAULT_BIO
                 val session = sessionManager.saveSession(
                     userId = finalUserId,
                     displayName = finalDisplayName,
@@ -1071,7 +1124,8 @@ class ChatRepository(
                     serverToken = body?.resolvedToken(),
                     registeredAtMillis = now,
                     registeredAtFormatted = formatted,
-                    deviceIdOverride = effectiveDeviceId
+                    deviceIdOverride = effectiveDeviceId,
+                    bio = resolvedBio
                 )
 
                 userDao.upsertUser(
@@ -1079,6 +1133,7 @@ class ChatRepository(
                         userId = finalUserId,
                         displayName = finalDisplayName,
                         phone = finalPhone,
+                        bio = resolvedBio,
                         avatarUrl = resolvedAvatar,
                         lastLoginMillis = now,
                         lastLoginFormatted = formatted,
@@ -1266,6 +1321,7 @@ class ChatRepository(
             userId = uid,
             displayName = rawName.ifBlank { uid },
             phone = formattedPhone,
+            bio = resolvedBio(),
             avatarUrl = resolvedAvatarUrl(),
             lastLoginMillis = millis,
             lastLoginFormatted = resolvedLastLoginFormatted().ifBlank { formatDateTime(millis) },
@@ -1332,6 +1388,7 @@ class ChatRepository(
                         userId = existingSelf?.userId ?: currentSession.userId,
                         displayName = currentSession.displayName.ifBlank { existingSelf?.displayName ?: currentSession.userId },
                         phone = currentSession.phone.ifBlank { existingSelf?.phone.orEmpty() },
+                        bio = currentSession.bio.ifBlank { existingSelf?.bio.orEmpty() },
                         avatarUrl = currentSession.avatarUrl ?: existingSelf?.avatarUrl,
                         lastLoginMillis = maxOf(currentSession.registeredAtMillis, existingSelf?.lastLoginMillis ?: 0L),
                         lastLoginFormatted = currentSession.registeredAtFormatted.ifBlank {
@@ -2133,9 +2190,324 @@ class ChatRepository(
         }
     }
 
+    suspend fun updateUserProfile(
+        displayName: String,
+        bio: String,
+        pickedAvatarUri: Uri? = null,
+        removeAvatar: Boolean = false
+    ): Result<UserSession> = withContext(Dispatchers.IO) {
+        val current = sessionManager.getCurrentSession()
+            ?: return@withContext Result.failure(IllegalStateException("Not signed in."))
+        val cleanName = displayName.trim()
+        if (cleanName.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Display name cannot be empty."))
+        }
+        val cleanBio = bio.trim().ifBlank { UserSession.DEFAULT_BIO }
+
+        var resolvedAvatar = if (removeAvatar) null else current.avatarUrl
+        if (pickedAvatarUri != null) {
+            val uploadResult = uploadAvatarPhoto(pickedAvatarUri, current.userId)
+            if (uploadResult.isFailure) {
+                return@withContext Result.failure(
+                    uploadResult.exceptionOrNull() ?: IllegalStateException("Profile photo upload failed.")
+                )
+            }
+            resolvedAvatar = uploadResult.getOrNull()
+        }
+
+        val updatedSession = sessionManager.updateLocalProfile(
+            displayName = cleanName,
+            bio = cleanBio,
+            avatarUrl = resolvedAvatar
+        ) ?: return@withContext Result.failure(IllegalStateException("Unable to update session."))
+
+        val existingUser = userDao.getUser(current.userId)
+        userDao.upsertUser(
+            UserEntity(
+                userId = updatedSession.userId,
+                displayName = updatedSession.displayName,
+                phone = updatedSession.phone,
+                bio = updatedSession.bio,
+                avatarUrl = updatedSession.avatarUrl,
+                lastLoginMillis = existingUser?.lastLoginMillis ?: updatedSession.registeredAtMillis,
+                lastLoginFormatted = existingUser?.lastLoginFormatted ?: updatedSession.registeredAtFormatted,
+                isOnline = signalingClient.isAppInForeground,
+                isBlocked = existingUser?.isBlocked ?: false
+            )
+        )
+
+        val updateReq = UpdateProfileRequest(
+            userId = updatedSession.userId,
+            displayName = updatedSession.displayName,
+            bio = updatedSession.bio,
+            avatarUrl = updatedSession.avatarUrl
+        )
+        runCatching {
+            val putResp = apiService.updateUserProfile(updatedSession.userId, updateReq)
+            if (!putResp.isSuccessful) {
+                val postResp = apiService.postUserProfile(updateReq)
+                if (!postResp.isSuccessful) {
+                    apiService.loginDirect(
+                        DirectLoginRequest(
+                            userId = updatedSession.userId,
+                            username = updatedSession.displayName,
+                            displayName = updatedSession.displayName,
+                            deviceId = updatedSession.deviceLockId,
+                            deviceLockId = updatedSession.deviceLockId,
+                            avatarUrl = updatedSession.avatarUrl,
+                            bio = updatedSession.bio,
+                            loginTimestamp = updatedSession.registeredAtMillis,
+                            loginDateFormatted = updatedSession.registeredAtFormatted
+                        )
+                    )
+                }
+            }
+        }
+        signalingClient.sendProfileUpdate(
+            userId = updatedSession.userId,
+            displayName = updatedSession.displayName,
+            bio = updatedSession.bio,
+            avatarUrl = updatedSession.avatarUrl
+        )
+        Result.success(updatedSession)
+    }
+
+    suspend fun syncStatuses() = withContext(Dispatchers.IO) {
+        val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
+        val now = System.currentTimeMillis()
+        statusDao.deleteExpiredStatuses(now)
+        runCatching {
+            val response = apiService.getStatuses(myId)
+            if (response.isSuccessful) {
+                val remote = BackendJsonParsers.parseStatusesFromBody(response.body()?.string())
+                if (remote.isNotEmpty()) {
+                    val entities = remote
+                        .filter { it.expiresAt > now }
+                        .map { dto ->
+                            val existing = statusDao.getStatusById(dto.id)
+                            val incoming = dto.toEntity(myId)
+                            if (existing != null) {
+                                incoming.copy(
+                                    localUri = existing.localUri ?: incoming.localUri,
+                                    isViewedByMe = existing.isViewedByMe || incoming.isViewedByMe,
+                                    viewCount = maxOf(existing.viewCount, incoming.viewCount)
+                                )
+                            } else {
+                                incoming
+                            }
+                        }
+                    statusDao.upsertStatuses(entities)
+                    entities.filter {
+                        it.type == StatusType.VIDEO &&
+                            it.localUri.isNullOrBlank() &&
+                            !it.mediaUrl.isNullOrBlank()
+                    }.forEach { status ->
+                        scope.launch { ensureStatusVideoDownloaded(status) }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun postTextStatus(
+        text: String,
+        backgroundColorHex: String = "#1B5E20"
+    ): Result<StatusUpdateEntity> = withContext(Dispatchers.IO) {
+        val session = sessionManager.getCurrentSession()
+            ?: return@withContext Result.failure(IllegalStateException("Not signed in."))
+        val cleanText = text.trim()
+        if (cleanText.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Enter status text."))
+        }
+        val now = System.currentTimeMillis()
+        val expiresAt = now + 24L * 60L * 60L * 1000L
+        val entity = StatusUpdateEntity(
+            id = "st_${UUID.randomUUID()}",
+            userId = session.userId,
+            userName = session.displayName,
+            userAvatarUrl = session.avatarUrl,
+            type = StatusType.TEXT,
+            textContent = cleanText,
+            backgroundColorHex = backgroundColorHex,
+            createdAt = now,
+            expiresAt = expiresAt,
+            isViewedByMe = true
+        )
+        statusDao.upsertStatus(entity)
+        dispatchStatusToServer(entity)
+        Result.success(entity)
+    }
+
+    suspend fun postMediaStatus(
+        uri: Uri,
+        isVideo: Boolean,
+        caption: String = ""
+    ): Result<StatusUpdateEntity> = withContext(Dispatchers.IO) {
+        val session = sessionManager.getCurrentSession()
+            ?: return@withContext Result.failure(IllegalStateException("Not signed in."))
+        val now = System.currentTimeMillis()
+        val statusId = "st_${UUID.randomUUID()}"
+        val fallbackType = if (isVideo) MessageType.VIDEO else MessageType.IMAGE
+        val mimeType = context.contentResolver.getType(uri) ?: defaultMimeTypeFor(fallbackType)
+        val (rawName, _) = queryUriMetadata(uri)
+        val safeName = ensureFileNameWithExtension(
+            rawName = rawName,
+            mimeType = mimeType,
+            fallbackPrefix = "status_${if (isVideo) "vid" else "img"}_$now",
+            defaultExt = defaultExtensionFor(fallbackType)
+        )
+        val cachedFile = copyUriToLocalCacheFile(uri, safeName)
+        val localUriStr = cachedFile?.let { Uri.fromFile(it).toString() } ?: uri.toString()
+
+        val uploadedUrl = if (cachedFile != null && cachedFile.exists()) {
+            uploadMediaFileWithProgress(
+                file = cachedFile,
+                fileName = safeName,
+                mimeType = mimeType,
+                mediaType = if (isVideo) "STATUS_VIDEO" else "STATUS_IMAGE",
+                senderId = session.userId,
+                messageId = statusId
+            ).also { MediaTransferTracker.clear(statusId) }
+        } else {
+            val bytes = readBytesFromUri(uri)
+            if (bytes != null) {
+                uploadMediaBytesToBackend(
+                    bytes = bytes,
+                    fileName = safeName,
+                    mimeType = mimeType,
+                    mediaType = if (isVideo) "STATUS_VIDEO" else "STATUS_IMAGE",
+                    senderId = session.userId
+                )
+            } else {
+                null
+            }
+        }
+
+        val entity = StatusUpdateEntity(
+            id = statusId,
+            userId = session.userId,
+            userName = session.displayName,
+            userAvatarUrl = session.avatarUrl,
+            type = if (isVideo) StatusType.VIDEO else StatusType.IMAGE,
+            textContent = caption.trim(),
+            mediaUrl = uploadedUrl,
+            localUri = localUriStr,
+            createdAt = now,
+            expiresAt = now + 24L * 60L * 60L * 1000L,
+            isViewedByMe = true
+        )
+        statusDao.upsertStatus(entity)
+        if (!uploadedUrl.isNullOrBlank()) {
+            dispatchStatusToServer(entity)
+        }
+        Result.success(entity)
+    }
+
+    private suspend fun dispatchStatusToServer(entity: StatusUpdateEntity) {
+        val req = CreateStatusRequest(
+            id = entity.id,
+            userId = entity.userId,
+            userName = entity.userName,
+            userAvatarUrl = entity.userAvatarUrl,
+            type = entity.type.name,
+            textContent = entity.textContent,
+            mediaUrl = entity.mediaUrl,
+            backgroundColorHex = entity.backgroundColorHex,
+            createdAt = entity.createdAt,
+            expiresAt = entity.expiresAt
+        )
+        signalingClient.sendStatusUpdate(req)
+        runCatching { apiService.createStatus(req) }
+    }
+
+    suspend fun markStatusViewed(status: StatusUpdateEntity) = withContext(Dispatchers.IO) {
+        val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
+        if (!status.isViewedByMe) {
+            statusDao.markViewed(status.id)
+            if (!status.userId.equals(myId, ignoreCase = true)) {
+                signalingClient.sendStatusViewed(status.id, myId, status.userId)
+                runCatching {
+                    apiService.markStatusViewed(status.id, StatusViewRequest(viewerId = myId))
+                }
+            }
+        }
+    }
+
+    suspend fun deleteStatus(statusId: String) = withContext(Dispatchers.IO) {
+        val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
+        statusDao.deleteStatus(statusId)
+        signalingClient.sendStatusDeleted(statusId, myId)
+        runCatching { apiService.deleteStatus(statusId, myId) }
+    }
+
+    suspend fun ensureStatusVideoDownloaded(status: StatusUpdateEntity): String? = withContext(Dispatchers.IO) {
+        val existingLocal = status.localUri?.trim()
+        if (!existingLocal.isNullOrBlank()) {
+            val localPath = if (existingLocal.startsWith("file://")) Uri.parse(existingLocal).path else null
+            if (localPath != null && File(localPath).exists()) return@withContext existingLocal
+        }
+        val remoteUrl = BackendJsonParsers.normalizeMediaUrl(status.mediaUrl) ?: return@withContext null
+        val dir = File(context.filesDir, "media_cache").apply { mkdirs() }
+        val finalFile = File(dir, "st_${status.id.take(16)}.mp4")
+        if (finalFile.exists() && finalFile.length() > 0L) {
+            val uriStr = Uri.fromFile(finalFile).toString()
+            statusDao.updateLocalUri(status.id, uriStr)
+            return@withContext uriStr
+        }
+        val tempFile = File(dir, "st_${status.id.take(16)}.mp4.part")
+        return@withContext runCatching {
+            val request = Request.Builder().url(remoteUrl).get().build()
+            mediaHttpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    tempFile.delete()
+                    return@runCatching null
+                }
+                val body = resp.body ?: return@runCatching null
+                body.byteStream().use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        input.copyTo(output, bufferSize = 64 * 1024)
+                        output.flush()
+                    }
+                }
+            }
+            if (tempFile.exists() && tempFile.length() > 0L) {
+                if (finalFile.exists()) finalFile.delete()
+                tempFile.renameTo(finalFile)
+                val uriStr = Uri.fromFile(finalFile).toString()
+                statusDao.updateLocalUri(status.id, uriStr)
+                uriStr
+            } else {
+                tempFile.delete()
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun RemoteStatusDto.toEntity(myId: String): StatusUpdateEntity {
+        val statusType = runCatching { StatusType.valueOf(type.uppercase()) }.getOrDefault(StatusType.TEXT)
+        return StatusUpdateEntity(
+            id = id,
+            userId = userId,
+            userName = userName,
+            userAvatarUrl = BackendJsonParsers.normalizeMediaUrl(userAvatarUrl),
+            type = statusType,
+            textContent = textContent,
+            mediaUrl = BackendJsonParsers.normalizeMediaUrl(mediaUrl),
+            backgroundColorHex = backgroundColorHex.ifBlank { "#1B5E20" },
+            createdAt = createdAt,
+            expiresAt = expiresAt,
+            isViewedByMe = userId.equals(myId, ignoreCase = true),
+            viewCount = viewCount
+        )
+    }
+
     suspend fun logout() = withContext(Dispatchers.IO) {
         val currentUserId = sessionManager.getCurrentSession()?.userId.orEmpty()
+        callPollingJob?.cancel()
         directoryRefreshJob?.cancel()
+        notifiedMessageIds.clear()
+        recentPresenceUpdates.clear()
+        CallSignalDeduplicator.clear()
         userDao.clearAllOnlineStatuses()
         signalingClient.sendPresenceAndDisconnect(currentUserId)
         sessionManager.clearSession()

@@ -29,12 +29,17 @@ data class UserSession(
     val userId: String,
     val displayName: String,
     val phone: String = "",
+    val bio: String = DEFAULT_BIO,
     val avatarUrl: String? = null,
     val sessionToken: String,
     val deviceLockId: String,
     val registeredAtMillis: Long,
     val registeredAtFormatted: String
-)
+) {
+    companion object {
+        const val DEFAULT_BIO = "Hey there! I am using Hello Sir."
+    }
+}
 
 /**
  * Enforces single-device session lock using Android Keystore AES-256-GCM encryption
@@ -59,6 +64,7 @@ class SessionManager(private val context: Context) {
         private const val PREF_USER_ID = "persist_user_id"
         private const val PREF_DISPLAY_NAME = "persist_display_name"
         private const val PREF_PHONE = "persist_phone"
+        private const val PREF_BIO = "persist_bio"
         private const val PREF_AVATAR_URL = "persist_avatar_url"
         private const val PREF_SESSION_TOKEN = "persist_session_token"
         private const val PREF_DEVICE_LOCK_ID = "persist_device_lock_id"
@@ -142,6 +148,8 @@ class SessionManager(private val context: Context) {
     private fun mirrorDurableIdentity(session: UserSession) {
         if (durablePrefs.getString(PREF_USER_ID, null) == session.userId &&
             durablePrefs.getString(PREF_DISPLAY_NAME, null) == session.displayName &&
+            durablePrefs.getString(PREF_BIO, UserSession.DEFAULT_BIO) == session.bio &&
+            durablePrefs.getString(PREF_AVATAR_URL, null) == session.avatarUrl &&
             durablePrefs.getString(PREF_SESSION_TOKEN, null) == session.sessionToken &&
             !durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)
         ) {
@@ -151,6 +159,7 @@ class SessionManager(private val context: Context) {
             .putString(PREF_USER_ID, session.userId)
             .putString(PREF_DISPLAY_NAME, session.displayName)
             .putString(PREF_PHONE, session.phone)
+            .putString(PREF_BIO, session.bio)
             .putString(PREF_AVATAR_URL, session.avatarUrl)
             .putString(PREF_SESSION_TOKEN, session.sessionToken)
             .putString(PREF_DEVICE_LOCK_ID, session.deviceLockId)
@@ -176,6 +185,8 @@ class SessionManager(private val context: Context) {
         val savedToken = durablePrefs.getString(PREF_SESSION_TOKEN, null)?.takeIf { it.isNotBlank() }
             ?: UUID.randomUUID().toString()
         val savedPhone = durablePrefs.getString(PREF_PHONE, "").orEmpty()
+        val savedBio = durablePrefs.getString(PREF_BIO, UserSession.DEFAULT_BIO)
+            ?.takeIf { it.isNotBlank() } ?: UserSession.DEFAULT_BIO
         val savedAvatar = durablePrefs.getString(PREF_AVATAR_URL, null)?.takeIf { it.isNotBlank() }
         val regMillis = durablePrefs.getLong(PREF_REG_MILLIS, System.currentTimeMillis())
         val regFmt = durablePrefs.getString(PREF_REG_FORMATTED, "").orEmpty()
@@ -184,6 +195,7 @@ class SessionManager(private val context: Context) {
             userId = savedUserId,
             displayName = savedDisplayName,
             phone = savedPhone,
+            bio = savedBio,
             avatarUrl = savedAvatar,
             sessionToken = savedToken,
             deviceLockId = expectedFingerprint,
@@ -274,20 +286,44 @@ class SessionManager(private val context: Context) {
         serverToken: String?,
         registeredAtMillis: Long,
         registeredAtFormatted: String,
-        deviceIdOverride: String? = null
+        deviceIdOverride: String? = null,
+        bio: String = UserSession.DEFAULT_BIO
     ): UserSession {
         val deviceLockId = getOrCreateDeviceLockId()
         val effectiveDeviceId = deviceIdOverride?.takeIf { it == deviceLockId } ?: deviceLockId
+        val cleanBio = bio.trim().ifBlank { UserSession.DEFAULT_BIO }
         val session = UserSession(
             userId = userId.trim(),
             displayName = displayName.trim(),
             phone = phone.trim(),
+            bio = cleanBio,
             avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
             sessionToken = serverToken?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
             deviceLockId = effectiveDeviceId,
             registeredAtMillis = registeredAtMillis,
             registeredAtFormatted = registeredAtFormatted
         )
+        persistSealedSession(session, deviceLockId)
+        return session
+    }
+
+    suspend fun updateLocalProfile(
+        displayName: String,
+        bio: String,
+        avatarUrl: String?
+    ): UserSession? {
+        val current = getCurrentSession() ?: return null
+        val updated = current.copy(
+            displayName = displayName.trim().ifBlank { current.displayName },
+            bio = bio.trim().ifBlank { UserSession.DEFAULT_BIO },
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() }
+        )
+        val deviceLockId = getOrCreateDeviceLockId()
+        persistSealedSession(updated, deviceLockId)
+        return updated
+    }
+
+    private suspend fun persistSealedSession(session: UserSession, deviceLockId: String) {
         pendingReSealJob?.cancel()
         pendingReSealJob = null
         cachedSession = session
@@ -296,6 +332,7 @@ class SessionManager(private val context: Context) {
             .putString(PREF_USER_ID, session.userId)
             .putString(PREF_DISPLAY_NAME, session.displayName)
             .putString(PREF_PHONE, session.phone)
+            .putString(PREF_BIO, session.bio)
             .putString(PREF_AVATAR_URL, session.avatarUrl)
             .putString(PREF_SESSION_TOKEN, session.sessionToken)
             .putString(PREF_DEVICE_LOCK_ID, session.deviceLockId)
@@ -313,7 +350,6 @@ class SessionManager(private val context: Context) {
                 prefs[KEY_DEVICE_LOCK_SECRET] = KeystoreCrypto.encrypt(deviceLockId)
             }
         }
-        return session
     }
 
     suspend fun clearSession() {

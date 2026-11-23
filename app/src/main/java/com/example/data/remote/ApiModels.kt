@@ -186,6 +186,8 @@ data class DirectLoginRequest(
     @Json(name = "device_id") val deviceId: String,
     @Json(name = "deviceLockId") val deviceLockId: String,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "bio") val bio: String? = null,
+    @Json(name = "about") val about: String? = bio,
     @Json(name = "loginTimestamp") val loginTimestamp: Long,
     @Json(name = "loginDateFormatted") val loginDateFormatted: String
 )
@@ -203,6 +205,8 @@ data class DirectLoginResponse(
     @Json(name = "username") val username: String? = null,
     @Json(name = "name") val nameTopLevel: String? = null,
     @Json(name = "phone") val phone: String? = null,
+    @Json(name = "bio") val bio: String? = null,
+    @Json(name = "about") val about: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
     @Json(name = "is_blocked") val isBlockedSnake: Boolean? = null,
@@ -229,6 +233,11 @@ data class DirectLoginResponse(
     fun resolvedPhone(): String =
         phone?.trim()?.takeIf { it.isNotBlank() } ?: user?.resolvedPhone().orEmpty()
 
+    fun resolvedBio(): String =
+        bio?.trim()?.takeIf { it.isNotBlank() }
+            ?: about?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.resolvedBio().orEmpty()
+
     fun resolvedAvatarUrl(): String? =
         BackendJsonParsers.normalizeMediaUrl(
             avatarUrl?.takeIf { it.isNotBlank() }
@@ -245,6 +254,7 @@ data class RegisterUserRequest(
     @Json(name = "userId") val userId: String,
     @Json(name = "displayName") val displayName: String,
     @Json(name = "phone") val phone: String = "",
+    @Json(name = "bio") val bio: String? = null,
     @Json(name = "device_id") val deviceId: String,
     @Json(name = "deviceLockId") val deviceLockId: String,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
@@ -304,6 +314,8 @@ data class RemoteUserDto(
     @Json(name = "username") val username: String? = null,
     @Json(name = "name") val name: String? = null,
     @Json(name = "phone") val phone: String? = null,
+    @Json(name = "bio") val bio: String? = null,
+    @Json(name = "about") val about: String? = null,
     @Json(name = "avatarUrl") val avatarUrl: String? = null,
     @Json(name = "avatar_url") val avatarUrlSnake: String? = null,
     @Json(name = "lastLoginMillis") val lastLoginMillis: Long? = null,
@@ -330,6 +342,11 @@ data class RemoteUserDto(
             ?: ""
 
     fun resolvedPhone(): String = phone?.trim().orEmpty()
+
+    fun resolvedBio(): String =
+        bio?.trim()?.takeIf { it.isNotBlank() }
+            ?: about?.trim()?.takeIf { it.isNotBlank() }
+            ?: ""
 
     fun resolvedAvatarUrl(): String? =
         BackendJsonParsers.normalizeMediaUrl(
@@ -510,6 +527,56 @@ data class RemoteCallSignalDto(
     val sdpMid: String = "",
     val sdpMLineIndex: Int = 0,
     val timestamp: Long = System.currentTimeMillis()
+)
+
+@JsonClass(generateAdapter = true)
+data class UpdateProfileRequest(
+    @Json(name = "userId") val userId: String,
+    @Json(name = "user_id") val userIdSnake: String = userId,
+    @Json(name = "displayName") val displayName: String,
+    @Json(name = "display_name") val displayNameSnake: String = displayName,
+    @Json(name = "username") val username: String = displayName,
+    @Json(name = "bio") val bio: String,
+    @Json(name = "about") val about: String = bio,
+    @Json(name = "avatarUrl") val avatarUrl: String? = null,
+    @Json(name = "avatar_url") val avatarUrlSnake: String? = avatarUrl
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateStatusRequest(
+    @Json(name = "id") val id: String,
+    @Json(name = "userId") val userId: String,
+    @Json(name = "user_id") val userIdSnake: String = userId,
+    @Json(name = "userName") val userName: String,
+    @Json(name = "displayName") val displayName: String = userName,
+    @Json(name = "userAvatarUrl") val userAvatarUrl: String? = null,
+    @Json(name = "type") val type: String,
+    @Json(name = "textContent") val textContent: String = "",
+    @Json(name = "caption") val caption: String = textContent,
+    @Json(name = "mediaUrl") val mediaUrl: String? = null,
+    @Json(name = "backgroundColorHex") val backgroundColorHex: String = "#1B5E20",
+    @Json(name = "createdAt") val createdAt: Long,
+    @Json(name = "expiresAt") val expiresAt: Long
+)
+
+@JsonClass(generateAdapter = true)
+data class StatusViewRequest(
+    @Json(name = "viewerId") val viewerId: String,
+    @Json(name = "userId") val userId: String = viewerId
+)
+
+data class RemoteStatusDto(
+    val id: String,
+    val userId: String,
+    val userName: String,
+    val userAvatarUrl: String? = null,
+    val type: String = "TEXT",
+    val textContent: String = "",
+    val mediaUrl: String? = null,
+    val backgroundColorHex: String = "#1B5E20",
+    val createdAt: Long = System.currentTimeMillis(),
+    val expiresAt: Long = createdAt + 24L * 60L * 60L * 1000L,
+    val viewCount: Int = 0
 )
 
 object BackendJsonParsers {
@@ -983,10 +1050,12 @@ object BackendJsonParsers {
         }
         val isBlocked = obj.optBoolean("isBlocked", obj.optBoolean("is_blocked", false))
         val deviceId = firstNonBlankString(obj, "device_id", "deviceId", "deviceLockId")
+        val bio = firstNonBlankString(obj, "bio", "about", "statusText", "status_text")
         return RemoteUserDto(
             userId = uid,
             displayName = displayName,
             phone = phone,
+            bio = bio,
             avatarUrl = avatarUrl,
             lastLoginMillis = millis,
             lastLoginFormatted = formatted,
@@ -1304,5 +1373,99 @@ object BackendJsonParsers {
         }
         return null
     }
+
+    fun parseStatusesFromBody(rawJson: String?): List<RemoteStatusDto> {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty()) return emptyList()
+        return runCatching {
+            when {
+                trimmed.startsWith("[") -> parseStatusArray(org.json.JSONArray(trimmed))
+                trimmed.startsWith("{") -> {
+                    val obj = org.json.JSONObject(trimmed)
+                    val arrayKeys = listOf("statuses", "updates", "stories", "data", "results", "items")
+                    val array = arrayKeys.firstNotNullOfOrNull { key -> obj.optJSONArray(key) }
+                    if (array != null) {
+                        parseStatusArray(array)
+                    } else {
+                        val single = obj.optJSONObject("status") ?: obj.optJSONObject("data") ?: obj
+                        listOfNotNull(parseSingleStatus(single))
+                    }
+                }
+                else -> emptyList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun parseStatusArray(arr: org.json.JSONArray): List<RemoteStatusDto> {
+        val result = mutableListOf<RemoteStatusDto>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            parseSingleStatus(item)?.let { result.add(it) }
+        }
+        return result
+    }
+
+    fun parseSingleStatus(obj: org.json.JSONObject): RemoteStatusDto? {
+        val userObj = obj.optJSONObject("user") ?: obj.optJSONObject("author")
+        val userId = firstNonBlankString(obj, "userId", "user_id", "authorId", "author_id", "senderId", "sender_id")
+            ?: userObj?.let { firstNonBlankString(it, "userId", "user_id", "id") }
+            ?: return null
+        val userName = firstNonBlankString(obj, "userName", "user_name", "displayName", "display_name", "authorName", "senderName")
+            ?: userObj?.let { firstNonBlankString(it, "displayName", "display_name", "username", "name") }
+            ?: userId
+        val userAvatarUrl = normalizeMediaUrl(
+            firstNonBlankString(obj, "userAvatarUrl", "user_avatar_url", "avatarUrl", "avatar_url")
+                ?: userObj?.let { firstNonBlankString(it, "avatarUrl", "avatar_url") }
+        )
+        val mediaUrl = normalizeMediaUrl(
+            firstNonBlankString(obj, "mediaUrl", "media_url", "fileUrl", "file_url", "imageUrl", "videoUrl", "url")
+        )
+        val textContent = firstNonBlankString(obj, "textContent", "text_content", "caption", "text", "content") ?: ""
+        if (mediaUrl.isNullOrBlank() && textContent.isBlank()) return null
+
+        val rawType = firstNonBlankString(obj, "statusType", "status_type", "mediaType", "media_type", "type")
+            ?.trim()?.uppercase()
+        val normalizedType = when {
+            rawType in setOf("VIDEO", "VID", "MP4") -> "VIDEO"
+            rawType in setOf("IMAGE", "PHOTO", "PIC", "IMG") -> "IMAGE"
+            rawType == "TEXT" && mediaUrl.isNullOrBlank() -> "TEXT"
+            !mediaUrl.isNullOrBlank() -> {
+                val lower = mediaUrl.lowercase()
+                if (lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".webm") || lower.endsWith(".mkv")) {
+                    "VIDEO"
+                } else {
+                    "IMAGE"
+                }
+            }
+            else -> "TEXT"
+        }
+
+        val bgHex = firstNonBlankString(obj, "backgroundColorHex", "background_color_hex", "bgColor", "backgroundColor", "background_color")
+            ?: "#1B5E20"
+        val createdAt = parseTimestampMillis(obj, "createdAt", "created_at", "timestamp") ?: System.currentTimeMillis()
+        val expiresAt = parseTimestampMillis(obj, "expiresAt", "expires_at")
+            ?: (createdAt + 24L * 60L * 60L * 1000L)
+        val id = firstNonBlankString(obj, "id", "statusId", "status_id", "_id")
+            ?: "st_${userId}_$createdAt"
+        val viewCount = listOf("viewCount", "view_count", "viewsCount", "views_count")
+            .firstOrNull { obj.has(it) && !obj.isNull(it) }
+            ?.let { obj.optInt(it, 0) }
+            ?: (obj.optJSONArray("viewers")?.length() ?: 0)
+
+        return RemoteStatusDto(
+            id = id,
+            userId = userId,
+            userName = userName,
+            userAvatarUrl = userAvatarUrl,
+            type = normalizedType,
+            textContent = textContent,
+            mediaUrl = mediaUrl,
+            backgroundColorHex = bgHex,
+            createdAt = createdAt,
+            expiresAt = expiresAt,
+            viewCount = viewCount
+        )
+    }
 }
+
 

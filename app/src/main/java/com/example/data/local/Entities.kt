@@ -22,11 +22,18 @@ enum class MessageStatus {
     READ
 }
 
+enum class StatusType {
+    TEXT,
+    IMAGE,
+    VIDEO
+}
+
 @Entity(tableName = "users")
 data class UserEntity(
     @PrimaryKey val userId: String,
     val displayName: String,
     val phone: String = "",
+    val bio: String = "",
     val avatarUrl: String? = null,
     val lastLoginMillis: Long,
     val lastLoginFormatted: String,
@@ -77,4 +84,28 @@ data class MessageEntity(
     val status: MessageStatus = MessageStatus.PENDING,
     val timestamp: Long = System.currentTimeMillis(),
     val isDeleted: Boolean = false
+)
+
+@Entity(
+    tableName = "status_updates",
+    indices = [
+        Index(value = ["userId"]),
+        Index(value = ["expiresAt"]),
+        Index(value = ["createdAt"])
+    ]
+)
+data class StatusUpdateEntity(
+    @PrimaryKey val id: String,
+    val userId: String,
+    val userName: String,
+    val userAvatarUrl: String? = null,
+    val type: StatusType = StatusType.TEXT,
+    val textContent: String = "",
+    val mediaUrl: String? = null,
+    val localUri: String? = null,
+    val backgroundColorHex: String = "#1B5E20",
+    val createdAt: Long = System.currentTimeMillis(),
+    val expiresAt: Long = createdAt + 24L * 60L * 60L * 1000L,
+    val isViewedByMe: Boolean = false,
+    val viewCount: Int = 0
 )

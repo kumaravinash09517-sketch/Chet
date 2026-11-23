@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -25,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.AutoStories
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
@@ -84,6 +86,7 @@ import com.example.core.security.ServerStatus
 import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageStatus
+import com.example.data.local.StatusUpdateEntity
 import com.example.data.local.UserEntity
 import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
@@ -113,6 +116,13 @@ fun HomeScreen(
     wsConnected: Boolean,
     currentShayari: DailyShayari = ShayariManager.shayariCollection.first(),
     onNextShayari: () -> Unit = {},
+    statuses: List<StatusUpdateEntity> = emptyList(),
+    isPostingStatus: Boolean = false,
+    onPostTextStatus: (text: String, backgroundColorHex: String) -> Unit = { _, _ -> },
+    onPostMediaStatus: (uri: Uri, isVideo: Boolean, caption: String) -> Unit = { _, _, _ -> },
+    onMarkStatusViewed: (StatusUpdateEntity) -> Unit = {},
+    onDeleteStatus: (String) -> Unit = {},
+    onRefreshStatuses: () -> Unit = {},
     hasContactPermission: () -> Boolean,
     onSearchQueryChange: (String) -> Unit,
     onRefreshDirectory: () -> Unit,
@@ -239,7 +249,10 @@ fun HomeScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = onRefreshDirectory,
+                        onClick = {
+                            onRefreshDirectory()
+                            onRefreshStatuses()
+                        },
                         modifier = Modifier.testTag("refresh_directory_button")
                     ) {
                         Icon(
@@ -310,10 +323,36 @@ fun HomeScreen(
                     },
                     modifier = Modifier.testTag("tab_chats")
                 )
+                val hasUnviewedStatus = remember(statuses, session.userId) {
+                    statuses.any { !it.userId.equals(session.userId, ignoreCase = true) && !it.isViewedByMe }
+                }
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = {
                         selectedTab = 1
+                        onRefreshStatuses()
+                    },
+                    icon = {
+                        BadgedBox(
+                            badge = {
+                                if (hasUnviewedStatus) {
+                                    Badge(
+                                        containerColor = OnlineGreen,
+                                        modifier = Modifier.testTag("updates_tab_badge")
+                                    )
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Rounded.AutoStories, contentDescription = "Status Updates")
+                        }
+                    },
+                    label = { Text("Updates") },
+                    modifier = Modifier.testTag("tab_updates")
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = {
+                        selectedTab = 2
                         onRefreshDirectory()
                     },
                     icon = {
@@ -355,34 +394,37 @@ fun HomeScreen(
             }
 
             LaunchedEffect(selectedTab) {
-                if (selectedTab == 1) {
-                    onRefreshDirectory()
+                when (selectedTab) {
+                    1 -> onRefreshStatuses()
+                    2 -> onRefreshDirectory()
                 }
             }
 
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = onSearchQueryChange,
-                placeholder = {
-                    Text("Search by name, user ID, or phone…")
-                },
-                leadingIcon = {
-                    Icon(Icons.Rounded.Search, contentDescription = "Search")
-                },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { onSearchQueryChange("") }) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+            if (selectedTab != 1) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    placeholder = {
+                        Text("Search by name, user ID, or phone…")
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Rounded.Search, contentDescription = "Search")
+                    },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearchQueryChange("") }) {
+                                Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                            }
                         }
-                    }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
-                    .testTag("home_search_input")
-            )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .testTag("home_search_input")
+                )
+            }
 
             if (selectedTab == 0) {
                 if (searchQuery.isBlank()) {
@@ -462,6 +504,16 @@ fun HomeScreen(
                         }
                     }
                 }
+            } else if (selectedTab == 1) {
+                StatusUpdatesTabContent(
+                    session = session,
+                    statuses = statuses,
+                    isPostingStatus = isPostingStatus,
+                    onPostTextStatus = onPostTextStatus,
+                    onPostMediaStatus = onPostMediaStatus,
+                    onMarkStatusViewed = onMarkStatusViewed,
+                    onDeleteStatus = onDeleteStatus
+                )
             } else {
                 if (filteredUsers.isEmpty()) {
                     val cleanQuery = searchQuery.trim()
@@ -787,6 +839,16 @@ private fun RegisteredUserRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (user.bio.isNotBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = user.bio,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

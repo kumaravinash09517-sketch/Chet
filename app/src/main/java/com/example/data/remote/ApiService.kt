@@ -9,6 +9,7 @@ import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Multipart
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Part
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -29,6 +30,15 @@ interface ApiService {
 
     @POST("api/users/register")
     suspend fun registerUser(@Body request: RegisterUserRequest): Response<RegisterUserResponse>
+
+    @PUT("api/users/{userId}")
+    suspend fun updateUserProfile(
+        @Path("userId") userId: String,
+        @Body request: UpdateProfileRequest
+    ): Response<ResponseBody>
+
+    @POST("api/users/profile")
+    suspend fun postUserProfile(@Body request: UpdateProfileRequest): Response<ResponseBody>
 
     @GET("api/users")
     suspend fun getUserDirectory(): Response<ResponseBody>
@@ -81,6 +91,24 @@ interface ApiService {
     suspend fun markConversationRead(
         @Path("peerId") peerId: String,
         @Query("userId") currentUserId: String
+    ): Response<BasicSuccessResponse>
+
+    @GET("api/statuses")
+    suspend fun getStatuses(@Query("userId") currentUserId: String): Response<ResponseBody>
+
+    @POST("api/statuses")
+    suspend fun createStatus(@Body request: CreateStatusRequest): Response<ResponseBody>
+
+    @DELETE("api/statuses/{statusId}")
+    suspend fun deleteStatus(
+        @Path("statusId") statusId: String,
+        @Query("userId") currentUserId: String
+    ): Response<BasicSuccessResponse>
+
+    @POST("api/statuses/{statusId}/view")
+    suspend fun markStatusViewed(
+        @Path("statusId") statusId: String,
+        @Body request: StatusViewRequest
     ): Response<BasicSuccessResponse>
 
     @Multipart

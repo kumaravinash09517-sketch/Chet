@@ -1093,4 +1093,159 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `statusDao stores active statuses, filters expired ones, and updates viewed state and deletion`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val statusDao = db.statusDao()
+            val now = 2_000_000_000_000L
+            statusDao.upsertStatuses(
+                listOf(
+                    com.example.data.local.StatusUpdateEntity(
+                        id = "st_active_text",
+                        userId = "sandeep_92",
+                        userName = "Sandeep",
+                        type = com.example.data.local.StatusType.TEXT,
+                        textContent = "Good morning!",
+                        backgroundColorHex = "#1B5E20",
+                        createdAt = now - 5_000L,
+                        expiresAt = now + 60_000L,
+                        isViewedByMe = false
+                    ),
+                    com.example.data.local.StatusUpdateEntity(
+                        id = "st_expired",
+                        userId = "sandeep_92",
+                        userName = "Sandeep",
+                        type = com.example.data.local.StatusType.IMAGE,
+                        mediaUrl = "https://rendar-ud3i.onrender.com/uploads/old.jpg",
+                        createdAt = now - 100_000L,
+                        expiresAt = now - 1_000L,
+                        isViewedByMe = false
+                    )
+                )
+            )
+
+            val active = statusDao.observeActiveStatuses(now).first()
+            assertEquals(1, active.size)
+            assertEquals("st_active_text", active.first().id)
+            org.junit.Assert.assertFalse(active.first().isViewedByMe)
+
+            statusDao.markViewed("st_active_text")
+            statusDao.updateViewCountIfHigher("st_active_text", 3)
+            val viewedItem = statusDao.getStatusById("st_active_text")
+            assertTrue(viewedItem?.isViewedByMe == true)
+            assertEquals(3, viewedItem?.viewCount)
+
+            statusDao.deleteExpiredStatuses(now)
+            assertEquals(null, statusDao.getStatusById("st_expired"))
+
+            statusDao.deleteStatus("st_active_text")
+            assertTrue(statusDao.observeAllStatuses().first().isEmpty())
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `sessionManager persists edited bio and displayName across key rotation recovery and clears cleanly on logout`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sessionManager = com.example.core.security.SessionManager(context)
+        sessionManager.clearSession()
+
+        sessionManager.saveSession(
+            userId = "u_919455877902",
+            displayName = "Avinash",
+            phone = "+919455877902",
+            avatarUrl = null,
+            serverToken = "tok_profile_1",
+            registeredAtMillis = 1_763_900_000_000L,
+            registeredAtFormatted = "22 Nov 2026"
+        )
+
+        val updated = sessionManager.updateLocalProfile(
+            displayName = "Avinash Kumar",
+            bio = "Building Hello Sir!",
+            avatarUrl = "https://rendar-ud3i.onrender.com/uploads/avatar.png"
+        )
+        assertEquals("Avinash Kumar", updated?.displayName)
+        assertEquals("Building Hello Sir!", updated?.bio)
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/avatar.png", updated?.avatarUrl)
+
+        sessionManager.simulateUpdateKeyRotationForTest()
+        val recovered = sessionManager.getCurrentSession()
+        assertEquals("Avinash Kumar", recovered?.displayName)
+        assertEquals("Building Hello Sir!", recovered?.bio)
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/avatar.png", recovered?.avatarUrl)
+
+        sessionManager.clearSession()
+        assertEquals(null, sessionManager.getCurrentSession())
+    }
+
+    @Test
+    fun `backendJsonParsers parses text, image, and video statuses and user bio fields`() {
+        val users = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """
+            {
+              "users": [
+                {
+                  "userId": "sandeep_01",
+                  "displayName": "Sandeep",
+                  "about": "At work",
+                  "isOnline": true,
+                  "inForeground": true
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(1, users.size)
+        assertEquals("At work", users.first().bio)
+
+        val statuses = com.example.data.remote.BackendJsonParsers.parseStatusesFromBody(
+            """
+            {
+              "statuses": [
+                {
+                  "id": "st_1",
+                  "userId": "sandeep_01",
+                  "userName": "Sandeep",
+                  "type": "TEXT",
+                  "textContent": "Hello everyone!",
+                  "backgroundColorHex": "#0D47A1",
+                  "createdAt": 1763900000000,
+                  "expiresAt": 1763986400000,
+                  "viewCount": 2
+                },
+                {
+                  "id": "st_2",
+                  "userId": "avinash_01",
+                  "userName": "Avinash",
+                  "type": "VIDEO",
+                  "mediaUrl": "/uploads/clip.mp4",
+                  "caption": "Trip clip"
+                },
+                {
+                  "id": "st_3",
+                  "userId": "avinash_01",
+                  "userName": "Avinash",
+                  "mediaUrl": "/uploads/photo.jpg"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(3, statuses.size)
+        assertEquals("TEXT", statuses[0].type)
+        assertEquals("Hello everyone!", statuses[0].textContent)
+        assertEquals("#0D47A1", statuses[0].backgroundColorHex)
+        assertEquals(2, statuses[0].viewCount)
+        assertEquals("VIDEO", statuses[1].type)
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/clip.mp4", statuses[1].mediaUrl)
+        assertEquals("IMAGE", statuses[2].type)
+        assertEquals("https://rendar-ud3i.onrender.com/uploads/photo.jpg", statuses[2].mediaUrl)
+    }
 }

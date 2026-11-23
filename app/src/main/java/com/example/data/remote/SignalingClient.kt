@@ -87,6 +87,17 @@ sealed interface SignalingEvent {
         val reason: String,
         val callId: String = ""
     ) : SignalingEvent
+
+    data class ProfileUpdated(
+        val userId: String,
+        val displayName: String,
+        val bio: String,
+        val avatarUrl: String?
+    ) : SignalingEvent
+
+    data class StatusUpdateReceived(val dto: RemoteStatusDto) : SignalingEvent
+    data class StatusDeleted(val statusId: String) : SignalingEvent
+    data class StatusViewed(val statusId: String, val viewerId: String) : SignalingEvent
 }
 
 class SignalingClient(
@@ -203,6 +214,8 @@ class SignalingClient(
 
     suspend fun sendPresenceAndDisconnect(userId: String) {
         isAppInForeground = false
+        holdConnectionForCall = false
+        reconnectAttempt = 0
         backgroundDisconnectJob?.cancel()
         if (userId.isNotBlank() && webSocket != null) {
             sendPresenceFrame(userId, false)
@@ -385,6 +398,48 @@ class SignalingClient(
                 }
                 "user_registered", "directory_updated" -> {
                     _events.tryEmit(SignalingEvent.DirectoryUpdated)
+                }
+                "profile_updated", "user_updated" -> {
+                    val userId = firstNonBlank(data, "userId", "user_id", "id")
+                        ?: firstNonBlank(json, "userId", "user_id", "id")
+                    val displayName = firstNonBlank(data, "displayName", "display_name", "username", "name") ?: ""
+                    val bio = firstNonBlank(data, "bio", "about", "statusText", "status_text") ?: ""
+                    val avatarUrl = BackendJsonParsers.normalizeMediaUrl(
+                        firstNonBlank(data, "avatarUrl", "avatar_url")
+                    )
+                    if (!userId.isNullOrBlank()) {
+                        _events.tryEmit(
+                            SignalingEvent.ProfileUpdated(
+                                userId = userId,
+                                displayName = displayName,
+                                bio = bio,
+                                avatarUrl = avatarUrl
+                            )
+                        )
+                    }
+                    _events.tryEmit(SignalingEvent.DirectoryUpdated)
+                }
+                "status_update", "status_posted", "status_created" -> {
+                    val statusObj = json.optJSONObject("data") ?: json.optJSONObject("status") ?: json
+                    val dto = BackendJsonParsers.parseSingleStatus(statusObj)
+                    if (dto != null) {
+                        _events.tryEmit(SignalingEvent.StatusUpdateReceived(dto))
+                    }
+                }
+                "status_deleted", "delete_status" -> {
+                    val statusId = firstNonBlank(data, "statusId", "status_id", "id")
+                        ?: firstNonBlank(json, "statusId", "status_id", "id")
+                    if (!statusId.isNullOrBlank()) {
+                        _events.tryEmit(SignalingEvent.StatusDeleted(statusId))
+                    }
+                }
+                "status_viewed" -> {
+                    val statusId = firstNonBlank(data, "statusId", "status_id", "id")
+                        ?: firstNonBlank(json, "statusId", "status_id")
+                    val viewerId = firstNonBlank(data, "viewerId", "viewer_id", "userId", "user_id") ?: ""
+                    if (!statusId.isNullOrBlank()) {
+                        _events.tryEmit(SignalingEvent.StatusViewed(statusId, viewerId))
+                    }
                 }
                 "chat_message", "message" -> {
                     val msgObj = json.optJSONObject("data") ?: json.optJSONObject("message") ?: json
@@ -894,6 +949,64 @@ class SignalingClient(
                 put("receiverId", receiverId)
                 put("toUserId", receiverId)
                 put("to", receiverId)
+            }
+        )
+    }
+
+    fun sendProfileUpdate(
+        userId: String,
+        displayName: String,
+        bio: String,
+        avatarUrl: String?
+    ): Boolean {
+        return sendRaw(
+            JSONObject().apply {
+                put("type", "profile_updated")
+                put("userId", userId)
+                put("displayName", displayName)
+                put("bio", bio)
+                if (!avatarUrl.isNullOrBlank()) {
+                    put("avatarUrl", avatarUrl)
+                }
+            }
+        )
+    }
+
+    fun sendStatusUpdate(request: CreateStatusRequest): Boolean {
+        return sendRaw(
+            JSONObject().apply {
+                put("type", "status_update")
+                put("id", request.id)
+                put("userId", request.userId)
+                put("userName", request.userName)
+                request.userAvatarUrl?.let { put("userAvatarUrl", it) }
+                put("statusType", request.type)
+                put("textContent", request.textContent)
+                request.mediaUrl?.let { put("mediaUrl", it) }
+                put("backgroundColorHex", request.backgroundColorHex)
+                put("createdAt", request.createdAt)
+                put("expiresAt", request.expiresAt)
+            }
+        )
+    }
+
+    fun sendStatusDeleted(statusId: String, userId: String): Boolean {
+        return sendRaw(
+            JSONObject().apply {
+                put("type", "status_deleted")
+                put("statusId", statusId)
+                put("userId", userId)
+            }
+        )
+    }
+
+    fun sendStatusViewed(statusId: String, viewerId: String, ownerId: String): Boolean {
+        return sendRaw(
+            JSONObject().apply {
+                put("type", "status_viewed")
+                put("statusId", statusId)
+                put("viewerId", viewerId)
+                put("receiverId", ownerId)
             }
         )
     }

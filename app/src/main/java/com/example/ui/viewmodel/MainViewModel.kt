@@ -11,6 +11,7 @@ import com.example.core.security.KeystoreCrypto
 import com.example.core.security.ServerStatus
 import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
+import com.example.data.local.StatusUpdateEntity
 import com.example.data.local.UserEntity
 import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
@@ -60,6 +61,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directoryUsers: StateFlow<List<UserEntity>> = repository.usersFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val activeStatuses: StateFlow<List<StatusUpdateEntity>> = repository.statusesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val totalUnreadCount: StateFlow<Int?> = repository.totalUnreadCountFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
@@ -88,6 +92,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _currentShayari = MutableStateFlow(ShayariManager.nextShayariForAppOpen(app))
     val currentShayari: StateFlow<DailyShayari> = _currentShayari.asStateFlow()
+
+    private val _isSavingProfile = MutableStateFlow(false)
+    val isSavingProfile: StateFlow<Boolean> = _isSavingProfile.asStateFlow()
+
+    private val _profileFeedbackMessage = MutableStateFlow<String?>(null)
+    val profileFeedbackMessage: StateFlow<String?> = _profileFeedbackMessage.asStateFlow()
+
+    private val _isPostingStatus = MutableStateFlow(false)
+    val isPostingStatus: StateFlow<Boolean> = _isPostingStatus.asStateFlow()
 
     private var searchJob: Job? = null
 
@@ -250,6 +263,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissBlockedBanner() {
         GlobalSecurityEventBus.clearBlocked()
+    }
+
+    fun updateUserProfile(
+        displayName: String,
+        bio: String,
+        pickedAvatarUri: Uri?,
+        removeAvatar: Boolean = false
+    ) {
+        viewModelScope.launch {
+            _isSavingProfile.value = true
+            _profileFeedbackMessage.value = null
+            val res = repository.updateUserProfile(
+                displayName = displayName,
+                bio = bio,
+                pickedAvatarUri = pickedAvatarUri,
+                removeAvatar = removeAvatar
+            )
+            _isSavingProfile.value = false
+            _profileFeedbackMessage.value = res.fold(
+                onSuccess = { "Profile updated cleanly." },
+                onFailure = { it.message ?: "Unable to save profile." }
+            )
+        }
+    }
+
+    fun clearProfileFeedback() {
+        _profileFeedbackMessage.value = null
+    }
+
+    fun refreshStatuses() {
+        viewModelScope.launch {
+            repository.syncStatuses()
+        }
+    }
+
+    fun postTextStatus(text: String, backgroundColorHex: String) {
+        viewModelScope.launch {
+            _isPostingStatus.value = true
+            repository.postTextStatus(text, backgroundColorHex)
+            _isPostingStatus.value = false
+        }
+    }
+
+    fun postMediaStatus(uri: Uri, isVideo: Boolean, caption: String = "") {
+        viewModelScope.launch {
+            _isPostingStatus.value = true
+            repository.postMediaStatus(uri, isVideo, caption)
+            _isPostingStatus.value = false
+        }
+    }
+
+    fun markStatusViewed(status: StatusUpdateEntity) {
+        viewModelScope.launch {
+            repository.markStatusViewed(status)
+        }
+    }
+
+    fun deleteStatus(statusId: String) {
+        viewModelScope.launch {
+            repository.deleteStatus(statusId)
+        }
     }
 
     fun logout(onLoggedOut: (() -> Unit)? = null) {

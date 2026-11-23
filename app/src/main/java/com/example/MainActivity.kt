@@ -274,6 +274,10 @@ private fun HelloSirRoot(
     val loginFlowState by mainViewModel.loginFlowState.collectAsStateWithLifecycle()
     val isBlocked by mainViewModel.isBlockedByAdmin.collectAsStateWithLifecycle()
     val currentShayari by mainViewModel.currentShayari.collectAsStateWithLifecycle()
+    val activeStatuses by mainViewModel.activeStatuses.collectAsStateWithLifecycle()
+    val isPostingStatus by mainViewModel.isPostingStatus.collectAsStateWithLifecycle()
+    val isSavingProfile by mainViewModel.isSavingProfile.collectAsStateWithLifecycle()
+    val profileFeedback by mainViewModel.profileFeedbackMessage.collectAsStateWithLifecycle()
     val callState by callViewModel.callState.collectAsStateWithLifecycle()
     val isCallMinimized by callViewModel.isCallMinimized.collectAsStateWithLifecycle()
     val callDurationSeconds by callViewModel.callDurationSeconds.collectAsStateWithLifecycle()
@@ -425,6 +429,17 @@ private fun HelloSirRoot(
                             wsConnected = wsConnected,
                             currentShayari = currentShayari,
                             onNextShayari = { mainViewModel.rotateDailyShayari() },
+                            statuses = activeStatuses,
+                            isPostingStatus = isPostingStatus,
+                            onPostTextStatus = { text, colorHex ->
+                                mainViewModel.postTextStatus(text, colorHex)
+                            },
+                            onPostMediaStatus = { uri, isVideo, caption ->
+                                mainViewModel.postMediaStatus(uri, isVideo, caption)
+                            },
+                            onMarkStatusViewed = { mainViewModel.markStatusViewed(it) },
+                            onDeleteStatus = { mainViewModel.deleteStatus(it) },
+                            onRefreshStatuses = { mainViewModel.refreshStatuses() },
                             hasContactPermission = { mainViewModel.hasContactPermission() },
                             onSearchQueryChange = { mainViewModel.updateSearchQuery(it) },
                             onRefreshDirectory = { mainViewModel.refreshDirectory() },
@@ -449,6 +464,7 @@ private fun HelloSirRoot(
                     }
 
                     val messages by chatViewModel.messages.collectAsStateWithLifecycle()
+                    val transferProgress by chatViewModel.mediaTransferProgress.collectAsStateWithLifecycle()
                     val peerUser by chatViewModel.peerUser.collectAsStateWithLifecycle()
                     val myUserId by chatViewModel.myUserId.collectAsStateWithLifecycle()
                     val isPeerTyping by chatViewModel.isPeerTyping.collectAsStateWithLifecycle()
@@ -457,10 +473,15 @@ private fun HelloSirRoot(
 
                     ChatScreen(
                         peerId = route.peerId,
-                        peerName = route.peerName,
+                        peerName = peerUser?.displayName?.ifBlank { route.peerName } ?: route.peerName,
                         peerIsOnline = peerUser?.isOnline == true,
+                        peerPhone = peerUser?.phone.orEmpty(),
+                        peerBio = peerUser?.bio.orEmpty(),
+                        peerAvatarUrl = peerUser?.avatarUrl,
+                        peerLastSeen = peerUser?.lastLoginFormatted.orEmpty(),
                         myUserId = myUserId,
                         messages = messages,
+                        mediaTransferProgress = transferProgress,
                         isPeerTyping = isPeerTyping,
                         liveLocationMessageId = liveLocId,
                         statusBanner = statusBanner,
@@ -490,7 +511,13 @@ private fun HelloSirRoot(
                             session = activeSession,
                             isHardwareKeystoreActive = mainViewModel.isHardwareKeystoreActive(),
                             wsConnected = wsConnected,
+                            isSavingProfile = isSavingProfile,
+                            profileFeedback = profileFeedback,
                             onBack = { navController.popBackStack() },
+                            onSaveProfile = { displayName, bio, pickedUri, removeAvatar ->
+                                mainViewModel.updateUserProfile(displayName, bio, pickedUri, removeAvatar)
+                            },
+                            onClearProfileFeedback = { mainViewModel.clearProfileFeedback() },
                             onLogoutConfirmed = {
                                 mainViewModel.logout {
                                     navController.navigate(LoginRoute) {
