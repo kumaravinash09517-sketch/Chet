@@ -44,6 +44,7 @@ import com.example.data.remote.UpdateProfileRequest
 import com.example.data.remote.VerifyOtpRequest
 import com.example.data.remote.VerifyOtpResponse
 import com.example.platform.NotificationHelper
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -54,6 +55,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -347,7 +349,9 @@ class ChatRepository(
     private val sessionManager: SessionManager,
     private val mediaHttpClient: OkHttpClient = NetworkModule.provideImageOkHttpClient(sessionManager)
 ) : AuthGateway {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, _ -> }
+    )
     private val userDao = database.userDao()
     private val conversationDao = database.conversationDao()
     private val messageDao = database.messageDao()
@@ -379,7 +383,7 @@ class ChatRepository(
 
     init {
         scope.launch {
-            userDao.clearAllOnlineStatuses()
+            runCatching { userDao.clearAllOnlineStatuses() }
         }
         observeSignalingEvents()
         observeSessionForCallPolling()
@@ -416,6 +420,7 @@ class ChatRepository(
     private fun observeSessionForCallPolling() {
         scope.launch {
             sessionFlow
+                .catch { emit(null) }
                 .distinctUntilChangedBy { it?.userId }
                 .collect { session ->
                     callPollingJob?.cancel()
@@ -430,24 +435,28 @@ class ChatRepository(
 
     fun markLocalSelfPresence(online: Boolean) {
         scope.launch {
-            val myId = sessionManager.getCurrentSession()?.userId ?: return@launch
-            recentPresenceUpdates[myId.lowercase(Locale.ROOT)] = online to System.currentTimeMillis()
-            if (online) {
-                userDao.updateOnlineStatus(myId, true)
-            } else {
-                userDao.clearAllOnlineStatuses()
+            runCatching {
+                val myId = sessionManager.getCurrentSession()?.userId ?: return@runCatching
+                recentPresenceUpdates[myId.lowercase(Locale.ROOT)] = online to System.currentTimeMillis()
+                if (online) {
+                    userDao.updateOnlineStatus(myId, true)
+                } else {
+                    userDao.clearAllOnlineStatuses()
+                }
             }
         }
     }
 
     suspend fun pollBackgroundMessagesForNotifications(myId: String) = withContext(Dispatchers.IO) {
         if (myId.isBlank()) return@withContext
-        val peerIds = (
-            conversationsFlow.first().map { it.peerId } +
-                usersFlow.first()
-                    .filter { !it.userId.equals(myId, ignoreCase = true) }
-                    .map { it.userId }
-            ).distinct().take(25)
+        val peerIds = runCatching {
+            (
+                conversationsFlow.first().map { it.peerId } +
+                    usersFlow.first()
+                        .filter { !it.userId.equals(myId, ignoreCase = true) }
+                        .map { it.userId }
+                ).distinct().take(25)
+        }.getOrDefault(emptyList())
         for (peerId in peerIds) {
             runCatching { syncMessagesWithServer(peerId) }
         }
@@ -460,7 +469,7 @@ class ChatRepository(
             while (isActive) {
                 val fg = signalingClient.isAppInForeground
                 delay(if (fg) 4_000L else 12_000L)
-                val myId = sessionManager.getCurrentSession()?.userId ?: continue
+                val myId = runCatching { sessionManager.getCurrentSession()?.userId }.getOrNull() ?: continue
                 runCatching { syncUserDirectory() }
                 if (signalingClient.isAppInForeground) {
                     runCatching { syncStatuses() }
@@ -485,7 +494,9 @@ class ChatRepository(
         callPollingJob = scope.launch {
             var includeActive = true
             while (isActive) {
-                pollIncomingCallsOnce(includeActiveCalls = includeActive || fastCallPolling)
+                runCatching {
+                    pollIncomingCallsOnce(includeActiveCalls = includeActive || fastCallPolling)
+                }
                 includeActive = false
                 delay(if (fastCallPolling) 850L else 2_000L)
             }
@@ -661,19 +672,22 @@ class ChatRepository(
 
     private fun observeSignalingEvents() {
         scope.launch {
-            signalingClient.events.collect { event ->
-                val myId = sessionManager.getCurrentSession()?.userId ?: return@collect
-                when (event) {
-                    is SignalingEvent.SocketConnected -> {
-                        syncUserDirectory()
-                        syncStatuses()
-                        retryPendingMessages()
-                        pollIncomingCallsOnce(includeActiveCalls = true)
-                        launch { fetchIceServers() }
-                    }
-                    is SignalingEvent.DirectoryUpdated -> {
-                        syncUserDirectory()
-                    }
+            signalingClient.events
+                .catch { /* keep signaling observer alive */ }
+                .collect { event ->
+                    runCatching {
+                        val myId = sessionManager.getCurrentSession()?.userId ?: return@runCatching
+                        when (event) {
+                            is SignalingEvent.SocketConnected -> {
+                                runCatching { syncUserDirectory() }
+                                runCatching { syncStatuses() }
+                                runCatching { retryPendingMessages() }
+                                runCatching { pollIncomingCallsOnce(includeActiveCalls = true) }
+                                launch { runCatching { fetchIceServers() } }
+                            }
+                            is SignalingEvent.DirectoryUpdated -> {
+                                runCatching { syncUserDirectory() }
+                            }
                     is SignalingEvent.ProfileUpdated -> {
                         val existing = userDao.getUser(event.userId)
                         if (existing != null) {
@@ -822,8 +836,10 @@ class ChatRepository(
                             CallSignalDeduplicator.markDismissed(event.callId)
                         }
                     }
+                    else -> Unit
                 }
-            }
+                    }
+                }
         }
     }
 
@@ -978,17 +994,19 @@ class ChatRepository(
             deviceIdOverride = hardwareDeviceId
         )
 
-        userDao.upsertUser(
-            UserEntity(
-                userId = cleanId,
-                displayName = cleanName,
-                phone = cleanPhone,
-                avatarUrl = resolvedAvatar,
-                lastLoginMillis = now,
-                lastLoginFormatted = formatted,
-                isOnline = signalingClient.isAppInForeground
+        runCatching {
+            userDao.upsertUser(
+                UserEntity(
+                    userId = cleanId,
+                    displayName = cleanName,
+                    phone = cleanPhone,
+                    avatarUrl = resolvedAvatar,
+                    lastLoginMillis = now,
+                    lastLoginFormatted = formatted,
+                    isOnline = signalingClient.isAppInForeground
+                )
             )
-        )
+        }
 
         runCatching {
             apiService.sendAdminWebhook(
@@ -1002,8 +1020,8 @@ class ChatRepository(
             )
         }
 
-        signalingClient.connect()
-        syncUserDirectory()
+        runCatching { signalingClient.connect() }
+        runCatching { syncUserDirectory() }
         Result.success(session)
     }
 
@@ -1128,18 +1146,20 @@ class ChatRepository(
                     bio = resolvedBio
                 )
 
-                userDao.upsertUser(
-                    UserEntity(
-                        userId = finalUserId,
-                        displayName = finalDisplayName,
-                        phone = finalPhone,
-                        bio = resolvedBio,
-                        avatarUrl = resolvedAvatar,
-                        lastLoginMillis = now,
-                        lastLoginFormatted = formatted,
-                        isOnline = signalingClient.isAppInForeground
+                runCatching {
+                    userDao.upsertUser(
+                        UserEntity(
+                            userId = finalUserId,
+                            displayName = finalDisplayName,
+                            phone = finalPhone,
+                            bio = resolvedBio,
+                            avatarUrl = resolvedAvatar,
+                            lastLoginMillis = now,
+                            lastLoginFormatted = formatted,
+                            isOnline = signalingClient.isAppInForeground
+                        )
                     )
-                )
+                }
 
                 runCatching {
                     apiService.sendAdminWebhook(
@@ -1153,8 +1173,8 @@ class ChatRepository(
                     )
                 }
 
-                signalingClient.connect()
-                syncUserDirectory()
+                runCatching { signalingClient.connect() }
+                runCatching { syncUserDirectory() }
                 return@withContext Result.success(session)
             }
 
@@ -1270,17 +1290,19 @@ class ChatRepository(
                 deviceIdOverride = effectiveDeviceId
             )
 
-            userDao.upsertUser(
-                UserEntity(
-                    userId = finalUserId,
-                    displayName = finalDisplayName,
-                    phone = cleanPhone,
-                    avatarUrl = resolvedAvatar,
-                    lastLoginMillis = now,
-                    lastLoginFormatted = formatted,
-                    isOnline = signalingClient.isAppInForeground
+            runCatching {
+                userDao.upsertUser(
+                    UserEntity(
+                        userId = finalUserId,
+                        displayName = finalDisplayName,
+                        phone = cleanPhone,
+                        avatarUrl = resolvedAvatar,
+                        lastLoginMillis = now,
+                        lastLoginFormatted = formatted,
+                        isOnline = signalingClient.isAppInForeground
+                    )
                 )
-            )
+            }
 
             // Notify backend admin webhook about verified registration/login
             runCatching {
@@ -1295,8 +1317,8 @@ class ChatRepository(
                 )
             }
 
-            signalingClient.connect()
-            syncUserDirectory()
+            runCatching { signalingClient.connect() }
+            runCatching { syncUserDirectory() }
             Result.success(session)
         } catch (e: Exception) {
             Result.failure(e)
@@ -2275,7 +2297,7 @@ class ChatRepository(
     suspend fun syncStatuses() = withContext(Dispatchers.IO) {
         val myId = sessionManager.getCurrentSession()?.userId ?: return@withContext
         val now = System.currentTimeMillis()
-        statusDao.deleteExpiredStatuses(now)
+        runCatching { statusDao.deleteExpiredStatuses(now) }
         runCatching {
             val response = apiService.getStatuses(myId)
             if (response.isSuccessful) {

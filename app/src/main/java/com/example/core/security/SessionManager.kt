@@ -3,15 +3,19 @@ package com.example.core.security
 import android.content.Context
 import android.provider.Settings
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -21,7 +25,8 @@ import kotlinx.serialization.json.Json
 import java.util.UUID
 
 private val Context.secureSessionDataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "hello_sir_encrypted_session"
+    name = "hello_sir_encrypted_session",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
 )
 
 @Serializable
@@ -49,7 +54,9 @@ data class UserSession(
 class SessionManager(private val context: Context) {
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val recoveryScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, _ -> }
+    )
     private var pendingReSealJob: Job? = null
     private val durablePrefs = context.getSharedPreferences(DURABLE_PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -99,52 +106,57 @@ class SessionManager(private val context: Context) {
         }
     }
 
-    val sessionFlow: Flow<UserSession?> = context.secureSessionDataStore.data.map { prefs ->
-        if (durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
-            cachedSession = null
-            return@map null
-        }
-        val encrypted = prefs[KEY_ENCRYPTED_SESSION]
-        val expectedFingerprint = KeystoreCrypto.computeDeviceFingerprint(context)
+    val sessionFlow: Flow<UserSession?> = context.secureSessionDataStore.data
+        .catch { emit(emptyPreferences()) }
+        .map { prefs ->
+            if (durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
+                cachedSession = null
+                return@map null
+            }
+            val encrypted = prefs[KEY_ENCRYPTED_SESSION]
+            val expectedFingerprint = KeystoreCrypto.computeDeviceFingerprint(context)
 
-        if (encrypted != null) {
-            val decrypted = KeystoreCrypto.decrypt(encrypted)
-            if (decrypted != null) {
-                try {
-                    val session = json.decodeFromString<UserSession>(decrypted)
-                    if (session.deviceLockId == expectedFingerprint) {
-                        cachedSession = session
-                        cachedDeviceLockId = session.deviceLockId
-                        mirrorDurableIdentity(session)
-                        return@map session
+            if (encrypted != null) {
+                val decrypted = KeystoreCrypto.decrypt(encrypted)
+                if (decrypted != null) {
+                    try {
+                        val session = json.decodeFromString<UserSession>(decrypted)
+                        if (session.deviceLockId == expectedFingerprint) {
+                            cachedSession = session
+                            cachedDeviceLockId = session.deviceLockId
+                            mirrorDurableIdentity(session)
+                            return@map session
+                        }
+                    } catch (_: Throwable) {
+                        // Fall through to same-device durable recovery check below
                     }
-                } catch (_: Exception) {
-                    // Fall through to same-device durable recovery check below
                 }
             }
-        }
 
-        val recovered = recoverDurableSessionForThisDevice(expectedFingerprint)
-        if (recovered != null) {
-            cachedSession = recovered
-            cachedDeviceLockId = recovered.deviceLockId
-            pendingReSealJob?.cancel()
-            pendingReSealJob = recoveryScope.launch {
-                reSealIntoDataStore(recovered)
+            val recovered = recoverDurableSessionForThisDevice(expectedFingerprint)
+            if (recovered != null) {
+                cachedSession = recovered
+                cachedDeviceLockId = recovered.deviceLockId
+                pendingReSealJob?.cancel()
+                pendingReSealJob = recoveryScope.launch {
+                    reSealIntoDataStore(recovered)
+                }
+                return@map recovered
             }
-            return@map recovered
-        }
 
-        if (encrypted != null && !durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
-            GlobalSecurityEventBus.emitTamper("Device lock mismatch: session bound to another hardware profile.")
+            if (encrypted != null && !durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
+                GlobalSecurityEventBus.emitTamper("Device lock mismatch: session bound to another hardware profile.")
+            }
+            cachedSession = null
+            null
         }
-        cachedSession = null
-        null
-    }
 
     private fun currentAndroidId(): String =
-        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown-id"
+        runCatching {
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull() ?: "unknown-id"
 
+    @Synchronized
     private fun mirrorDurableIdentity(session: UserSession) {
         if (durablePrefs.getString(PREF_USER_ID, null) == session.userId &&
             durablePrefs.getString(PREF_DISPLAY_NAME, null) == session.displayName &&
@@ -235,7 +247,7 @@ class SessionManager(private val context: Context) {
             return null
         }
         cachedSession?.let { return it }
-        val loaded = sessionFlow.first()
+        val loaded = runCatching { sessionFlow.first() }.getOrNull()
         if (durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
             cachedSession = null
             return null
@@ -247,8 +259,9 @@ class SessionManager(private val context: Context) {
     suspend fun getOrCreateDeviceLockId(): String {
         cachedDeviceLockId?.let { return it }
         val currentFingerprint = KeystoreCrypto.computeDeviceFingerprint(context)
-        val prefs = context.secureSessionDataStore.data.first()
-        val storedEncrypted = prefs[KEY_DEVICE_LOCK_SECRET]
+        val storedEncrypted = runCatching {
+            context.secureSessionDataStore.data.first()[KEY_DEVICE_LOCK_SECRET]
+        }.getOrNull()
         if (storedEncrypted != null) {
             val decrypted = KeystoreCrypto.decrypt(storedEncrypted)
             if (decrypted == currentFingerprint) {

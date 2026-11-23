@@ -17,21 +17,35 @@ class SecurityAuthInterceptor(
     private val addJsonAcceptHeader: Boolean = true
 ) : Interceptor {
 
+    companion object {
+        fun sanitizeHeaderValue(raw: String): String =
+            raw.trim()
+                .filter { ch -> ch == '\t' || ch in ' '..'~' }
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
-        val session = runBlocking { sessionManager.getCurrentSession() }
-        val deviceLock = runBlocking { sessionManager.getOrCreateDeviceLockId() }
+        val session = runCatching { runBlocking { sessionManager.getCurrentSession() } }.getOrNull()
+        val deviceLock = runCatching { runBlocking { sessionManager.getOrCreateDeviceLockId() } }.getOrNull().orEmpty()
 
         val requestBuilder = chain.request().newBuilder()
-            .header("X-Device-Lock", deviceLock)
+        val safeLock = sanitizeHeaderValue(deviceLock)
+        if (safeLock.isNotEmpty()) {
+            requestBuilder.header("X-Device-Lock", safeLock)
+        }
 
         if (addJsonAcceptHeader) {
             requestBuilder.header("Accept", "application/json")
         }
 
         if (session != null) {
-            requestBuilder
-                .header("Authorization", "Bearer ${session.sessionToken}")
-                .header("X-User-Id", session.userId)
+            val safeToken = sanitizeHeaderValue(session.sessionToken)
+            val safeUserId = sanitizeHeaderValue(session.userId)
+            if (safeToken.isNotEmpty()) {
+                requestBuilder.header("Authorization", "Bearer $safeToken")
+            }
+            if (safeUserId.isNotEmpty()) {
+                requestBuilder.header("X-User-Id", safeUserId)
+            }
         }
 
         val response = chain.proceed(requestBuilder.build())

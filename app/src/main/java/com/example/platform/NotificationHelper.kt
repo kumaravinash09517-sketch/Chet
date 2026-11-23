@@ -74,60 +74,62 @@ object NotificationHelper {
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            runCatching {
+                val manager = context.getSystemService(NotificationManager::class.java) ?: return
 
-            // Keep channel sound silent so activeRingtone stops instantaneously when user answers/declines
-            val callChannel = NotificationChannel(
-                CHANNEL_CALLS,
-                context.getString(R.string.channel_calls_name),
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Full-screen incoming audio & video call alerts"
-                setSound(null, null)
-                enableVibration(false)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // Keep channel sound silent so activeRingtone stops instantaneously when user answers/declines
+                val callChannel = NotificationChannel(
+                    CHANNEL_CALLS,
+                    context.getString(R.string.channel_calls_name),
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Full-screen incoming audio & video call alerts"
+                    setSound(null, null)
+                    enableVibration(false)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+
+                val messageChannel = NotificationChannel(
+                    CHANNEL_MESSAGES,
+                    context.getString(R.string.channel_messages_name),
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Real-time incoming messages with inline reply"
+                    enableVibration(true)
+                    enableLights(true)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    val defaultSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    setSound(
+                        defaultSound,
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                }
+
+                val shayariChannel = NotificationChannel(
+                    CHANNEL_SHAYARI,
+                    context.getString(R.string.channel_shayari_name),
+                    NotificationManager.IMPORTANCE_DEFAULT
+                ).apply {
+                    description = "Daily morning Hindi Shayari inspiration"
+                }
+
+                val syncChannel = NotificationChannel(
+                    CHANNEL_SYNC,
+                    context.getString(R.string.channel_sync_name),
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Keeps encrypted WebRTC & messaging connection active"
+                    setShowBadge(false)
+                }
+
+                manager.createNotificationChannel(callChannel)
+                manager.createNotificationChannel(messageChannel)
+                manager.createNotificationChannel(shayariChannel)
+                manager.createNotificationChannel(syncChannel)
             }
-
-            val messageChannel = NotificationChannel(
-                CHANNEL_MESSAGES,
-                context.getString(R.string.channel_messages_name),
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Real-time incoming messages with inline reply"
-                enableVibration(true)
-                enableLights(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                val defaultSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                setSound(
-                    defaultSound,
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-            }
-
-            val shayariChannel = NotificationChannel(
-                CHANNEL_SHAYARI,
-                context.getString(R.string.channel_shayari_name),
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "Daily morning Hindi Shayari inspiration"
-            }
-
-            val syncChannel = NotificationChannel(
-                CHANNEL_SYNC,
-                context.getString(R.string.channel_sync_name),
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Keeps encrypted WebRTC & messaging connection active"
-                setShowBadge(false)
-            }
-
-            manager.createNotificationChannel(callChannel)
-            manager.createNotificationChannel(messageChannel)
-            manager.createNotificationChannel(shayariChannel)
-            manager.createNotificationChannel(syncChannel)
         }
     }
 
@@ -306,8 +308,10 @@ object NotificationHelper {
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", declinePending)
             .build()
 
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_CALL_ID, notification)
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager?.notify(NOTIFICATION_CALL_ID, notification)
+        }
     }
 
     fun showIncomingMessageNotification(
@@ -381,8 +385,10 @@ object NotificationHelper {
             .addAction(replyAction)
             .build()
 
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.notify(notifId, notification)
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager?.notify(notifId, notification)
+        }
     }
 
     fun showDailyShayariNotification(context: Context, shayari: DailyShayari) {
@@ -407,8 +413,10 @@ object NotificationHelper {
             .setContentIntent(openIntent)
             .build()
 
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_SHAYARI_ID, notification)
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager?.notify(NOTIFICATION_SHAYARI_ID, notification)
+        }
     }
 
     @Synchronized
@@ -440,8 +448,10 @@ object NotificationHelper {
     @Synchronized
     fun stopRingtoneAndVibrate(context: Context) {
         activeIncomingCallId = null
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.cancel(NOTIFICATION_CALL_ID)
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager?.cancel(NOTIFICATION_CALL_ID)
+        }
         stopRingtoneAndVibrateOnly(context)
     }
 

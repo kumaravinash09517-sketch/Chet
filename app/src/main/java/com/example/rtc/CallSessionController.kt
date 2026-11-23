@@ -12,6 +12,7 @@ import com.example.core.security.GlobalSecurityEventBus
 import com.example.data.remote.SignalingEvent
 import com.example.platform.ActiveCallService
 import com.example.platform.NotificationHelper
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.EglBase
@@ -37,12 +39,14 @@ import java.util.UUID
 class CallSessionController(
     private val app: HelloSirApplication
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { _, _ -> }
+    )
     private val repository get() = app.chatRepository
     private val signalingClient get() = app.signalingClient
 
-    private val eglBase: EglBase = EglBase.create()
-    val eglBaseContext: EglBase.Context get() = eglBase.eglBaseContext
+    private val eglBase: EglBase? by lazy { runCatching { EglBase.create() }.getOrNull() }
+    val eglBaseContext: EglBase.Context? get() = eglBase?.eglBaseContext
 
     private val _callState = MutableStateFlow<CallState>(CallState.Idle)
     val callState: StateFlow<CallState> = _callState.asStateFlow()
@@ -168,44 +172,50 @@ class CallSessionController(
 
     private fun observeNotificationCallActions() {
         scope.launch {
-            GlobalSecurityEventBus.callActions.collect { action ->
-                when (action) {
-                    is CallNotificationAction.Decline -> {
-                        if (_callState.value is CallState.IncomingRinging) {
-                            declineIncomingCall()
-                        } else {
-                            NotificationHelper.stopRingtoneAndVibrate(app)
-                        }
-                    }
-                    is CallNotificationAction.Answer -> {
-                        injectIncomingCallFromIntent(
-                            callId = action.callId,
-                            callerId = action.callerId,
-                            callerName = action.callerName,
-                            isVideo = action.isVideo,
-                            offerSdp = action.offerSdp
-                        )
-                        acceptIncomingCall()
-                    }
-                    CallNotificationAction.Hangup -> {
-                        if (hasOngoingCall()) {
-                            hangUp()
-                        }
-                    }
-                    CallNotificationAction.ToggleMute -> {
-                        if (hasOngoingCall()) {
-                            toggleMute()
+            GlobalSecurityEventBus.callActions
+                .catch { /* keep collector alive */ }
+                .collect { action ->
+                    runCatching {
+                        when (action) {
+                            is CallNotificationAction.Decline -> {
+                                if (_callState.value is CallState.IncomingRinging) {
+                                    declineIncomingCall()
+                                } else {
+                                    NotificationHelper.stopRingtoneAndVibrate(app)
+                                }
+                            }
+                            is CallNotificationAction.Answer -> {
+                                injectIncomingCallFromIntent(
+                                    callId = action.callId,
+                                    callerId = action.callerId,
+                                    callerName = action.callerName,
+                                    isVideo = action.isVideo,
+                                    offerSdp = action.offerSdp
+                                )
+                                acceptIncomingCall()
+                            }
+                            CallNotificationAction.Hangup -> {
+                                if (hasOngoingCall()) {
+                                    hangUp()
+                                }
+                            }
+                            CallNotificationAction.ToggleMute -> {
+                                if (hasOngoingCall()) {
+                                    toggleMute()
+                                }
+                            }
                         }
                     }
                 }
-            }
         }
     }
 
     private fun observeCallSignaling() {
         scope.launch {
-            signalingClient.events.collect { event ->
-                when (event) {
+            signalingClient.events
+                .catch { /* keep signaling observer alive */ }
+                .collect { event ->
+                    when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
                         val effectiveCallId = event.callId.ifBlank { UUID.randomUUID().toString() }
                         val current = _callState.value

@@ -55,7 +55,19 @@ abstract class AppDatabase : RoomDatabase() {
 
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''")
+                var hasBioColumn = false
+                db.query("PRAGMA table_info(`users`)").use { cursor ->
+                    val nameIndex = cursor.getColumnIndex("name")
+                    while (cursor.moveToNext()) {
+                        if (nameIndex >= 0 && cursor.getString(nameIndex).equals("bio", ignoreCase = true)) {
+                            hasBioColumn = true
+                            break
+                        }
+                    }
+                }
+                if (!hasBioColumn) {
+                    db.execSQL("ALTER TABLE `users` ADD COLUMN `bio` TEXT NOT NULL DEFAULT ''")
+                }
                 db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `status_updates` (
@@ -63,15 +75,15 @@ abstract class AppDatabase : RoomDatabase() {
                         `userId` TEXT NOT NULL,
                         `userName` TEXT NOT NULL,
                         `userAvatarUrl` TEXT,
-                        `type` TEXT NOT NULL DEFAULT 'TEXT',
-                        `textContent` TEXT NOT NULL DEFAULT '',
+                        `type` TEXT NOT NULL,
+                        `textContent` TEXT NOT NULL,
                         `mediaUrl` TEXT,
                         `localUri` TEXT,
-                        `backgroundColorHex` TEXT NOT NULL DEFAULT '#1B5E20',
+                        `backgroundColorHex` TEXT NOT NULL,
                         `createdAt` INTEGER NOT NULL,
                         `expiresAt` INTEGER NOT NULL,
-                        `isViewedByMe` INTEGER NOT NULL DEFAULT 0,
-                        `viewCount` INTEGER NOT NULL DEFAULT 0,
+                        `isViewedByMe` INTEGER NOT NULL,
+                        `viewCount` INTEGER NOT NULL,
                         PRIMARY KEY(`id`)
                     )
                     """.trimIndent()

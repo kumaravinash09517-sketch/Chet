@@ -69,7 +69,7 @@ import java.util.Locale
 @Composable
 fun CallScreen(
     callState: CallState,
-    eglBaseContext: EglBase.Context,
+    eglBaseContext: EglBase.Context?,
     isMuted: Boolean,
     isSpeakerOn: Boolean,
     isVideoEnabled: Boolean,
@@ -92,20 +92,28 @@ fun CallScreen(
     var pendingAcceptAfterPermission by remember { mutableStateOf(false) }
 
     val remoteView = remember(eglBaseContext) {
-        SurfaceViewRenderer(context).apply {
-            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-            setEnableHardwareScaler(true)
-            setMirror(false)
-            init(eglBaseContext, null)
+        eglBaseContext?.let { egl ->
+            runCatching {
+                SurfaceViewRenderer(context).apply {
+                    setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                    setEnableHardwareScaler(true)
+                    setMirror(false)
+                    init(egl, null)
+                }
+            }.getOrNull()
         }
     }
     val localView = remember(eglBaseContext) {
-        SurfaceViewRenderer(context).apply {
-            setZOrderMediaOverlay(true)
-            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-            setEnableHardwareScaler(true)
-            setMirror(true)
-            init(eglBaseContext, null)
+        eglBaseContext?.let { egl ->
+            runCatching {
+                SurfaceViewRenderer(context).apply {
+                    setZOrderMediaOverlay(true)
+                    setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                    setEnableHardwareScaler(true)
+                    setMirror(true)
+                    init(egl, null)
+                }
+            }.getOrNull()
         }
     }
 
@@ -224,8 +232,8 @@ fun CallScreen(
 
     DisposableEffect(remoteView, localView) {
         onDispose {
-            runCatching { localView.release() }
-            runCatching { remoteView.release() }
+            runCatching { localView?.release() }
+            runCatching { remoteView?.release() }
         }
     }
 
@@ -239,7 +247,7 @@ fun CallScreen(
             )
     ) {
         // Keep remoteView mounted throughout any active video call so SurfaceHolder exists before remote frames arrive
-        if (isVideoCall && isActiveCall) {
+        if (isVideoCall && isActiveCall && remoteView != null) {
             AndroidView(
                 factory = {
                     remoteView.apply {
@@ -262,7 +270,7 @@ fun CallScreen(
 
         // Local Self-Camera Preview:
         // Single persistent AndroidView transitions smoothly from full-screen preview to top-right PiP without tearing down SurfaceView.
-        if (showLocalPreview) {
+        if (showLocalPreview && localView != null) {
             val isPipMode = showRemoteVideo
             val localContainerModifier = if (isPipMode) {
                 Modifier

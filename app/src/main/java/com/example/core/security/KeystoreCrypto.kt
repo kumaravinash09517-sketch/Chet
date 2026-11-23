@@ -66,7 +66,7 @@ object KeystoreCrypto {
             val spec = GCMParameterSpec(GCM_TAG_BITS, iv)
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), spec)
             String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
@@ -76,10 +76,12 @@ object KeystoreCrypto {
      * and hardware build characteristics so cloned sessions on another device fail validation.
      */
     fun computeDeviceFingerprint(context: Context): String {
-        val androidId = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ANDROID_ID
-        ) ?: "unknown-id"
+        val androidId = runCatching {
+            Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ANDROID_ID
+            )
+        }.getOrNull() ?: "unknown-id"
         val raw = "${context.packageName}|$androidId|${android.os.Build.BOARD}|${android.os.Build.MODEL}"
         val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
@@ -89,7 +91,7 @@ object KeystoreCrypto {
         return try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
             keyStore.containsAlias(KEY_ALIAS)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             false
         }
     }

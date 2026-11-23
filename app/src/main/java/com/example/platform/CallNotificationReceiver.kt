@@ -10,6 +10,7 @@ import androidx.core.app.RemoteInput
 import com.example.HelloSirApplication
 import com.example.core.security.CallNotificationAction
 import com.example.core.security.GlobalSecurityEventBus
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -23,6 +24,8 @@ class CallNotificationReceiver : BroadcastReceiver() {
         const val ACTION_TOGGLE_MUTE = "com.example.ACTION_TOGGLE_MUTE"
     }
 
+    private val receiverExceptionHandler = CoroutineExceptionHandler { _, _ -> }
+
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext as? HelloSirApplication ?: return
         when (intent.action) {
@@ -35,15 +38,17 @@ class CallNotificationReceiver : BroadcastReceiver() {
                 }
                 GlobalSecurityEventBus.emitCallAction(CallNotificationAction.Decline(callerId))
                 val pendingResult = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
+                CoroutineScope(Dispatchers.IO + receiverExceptionHandler).launch {
                     try {
                         val myId = app.sessionManager.getCurrentSession()?.userId ?: return@launch
-                        app.signalingClient.sendCallEnd(myId, callerId, isReject = true, callId = callId)
-                        app.chatRepository.sendCallSignal(
-                            type = "decline",
-                            callId = callId.ifBlank { "decline_${System.currentTimeMillis()}" },
-                            receiverId = callerId
-                        )
+                        runCatching { app.signalingClient.sendCallEnd(myId, callerId, isReject = true, callId = callId) }
+                        runCatching {
+                            app.chatRepository.sendCallSignal(
+                                type = "decline",
+                                callId = callId.ifBlank { "decline_${System.currentTimeMillis()}" },
+                                receiverId = callerId
+                            )
+                        }
                     } finally {
                         pendingResult.finish()
                     }
@@ -52,17 +57,21 @@ class CallNotificationReceiver : BroadcastReceiver() {
             ACTION_HANGUP_CALL -> {
                 NotificationHelper.stopRingtoneAndVibrate(context)
                 Handler(Looper.getMainLooper()).post {
-                    if (app.callController.hasOngoingCall()) {
-                        app.callController.hangUp()
-                    } else {
-                        runCatching { context.stopService(Intent(context, ActiveCallService::class.java)) }
+                    runCatching {
+                        if (app.callController.hasOngoingCall()) {
+                            app.callController.hangUp()
+                        } else {
+                            context.stopService(Intent(context, ActiveCallService::class.java))
+                        }
                     }
                 }
             }
             ACTION_TOGGLE_MUTE -> {
                 Handler(Looper.getMainLooper()).post {
-                    if (app.callController.hasOngoingCall()) {
-                        app.callController.toggleMute()
+                    runCatching {
+                        if (app.callController.hasOngoingCall()) {
+                            app.callController.toggleMute()
+                        }
                     }
                 }
             }
@@ -75,11 +84,13 @@ class CallNotificationReceiver : BroadcastReceiver() {
                 val peerName = intent.getStringExtra(NotificationHelper.EXTRA_PEER_NAME) ?: peerId
                 if (replyText.isNotBlank()) {
                     val pendingResult = goAsync()
-                    CoroutineScope(Dispatchers.IO).launch {
+                    CoroutineScope(Dispatchers.IO + receiverExceptionHandler).launch {
                         try {
-                            app.chatRepository.sendTextMessage(peerId, peerName, replyText)
-                            val nm = context.getSystemService(NotificationManager::class.java)
-                            nm?.cancel(NotificationHelper.messageNotificationIdFor(peerId))
+                            runCatching { app.chatRepository.sendTextMessage(peerId, peerName, replyText) }
+                            runCatching {
+                                val nm = context.getSystemService(NotificationManager::class.java)
+                                nm?.cancel(NotificationHelper.messageNotificationIdFor(peerId))
+                            }
                         } finally {
                             pendingResult.finish()
                         }

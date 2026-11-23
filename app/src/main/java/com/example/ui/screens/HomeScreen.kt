@@ -455,7 +455,7 @@ fun HomeScreen(
                             filteredConversations.isNotEmpty() &&
                             (topUnread > 0 || chatsListState.firstVisibleItemIndex <= 2)
                         ) {
-                            chatsListState.animateScrollToItem(0)
+                            runCatching { chatsListState.animateScrollToItem(0) }
                         }
                     }
                     LazyColumn(

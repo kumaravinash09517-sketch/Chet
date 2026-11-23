@@ -48,8 +48,12 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
                 Intent.ACTION_SCREEN_OFF -> {
                     isUiInForeground = false
                     val hasOngoingCall = ::callController.isInitialized && callController.hasOngoingCall()
-                    signalingClient.setAppForeground(false, keepSocketForCall = hasOngoingCall)
-                    chatRepository.markLocalSelfPresence(false)
+                    if (::signalingClient.isInitialized) {
+                        runCatching { signalingClient.setAppForeground(false, keepSocketForCall = hasOngoingCall) }
+                    }
+                    if (::chatRepository.isInitialized) {
+                        runCatching { chatRepository.markLocalSelfPresence(false) }
+                    }
                 }
             }
         }
@@ -57,7 +61,7 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        NotificationHelper.createChannels(this)
+        runCatching { NotificationHelper.createChannels(this) }
 
         sessionManager = SessionManager(this)
         database = AppDatabase.getInstance(this)
@@ -83,11 +87,13 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(screenStateReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(screenStateReceiver, filter)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(screenStateReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(screenStateReceiver, filter)
+            }
         }
     }
 
@@ -100,10 +106,8 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
 
     fun startBackgroundSignalingService() {
         val intent = Intent(this, SignalingForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching { startForegroundService(intent) }
-        } else {
-            runCatching { startService(intent) }
+        runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(this, intent)
         }
     }
 

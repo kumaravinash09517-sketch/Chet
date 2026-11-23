@@ -215,32 +215,34 @@ object ShayariManager {
     }
 
     fun scheduleDailyMorningNotification(context: Context) {
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
-        val intent = Intent(context, MorningShayariReceiver::class.java).apply {
-            action = MorningShayariReceiver.ACTION_MORNING_SHAYARI
-        }
-        val pending = PendingIntent.getBroadcast(
-            context,
-            4011,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val nextMorning = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 7)
-            set(Calendar.MINUTE, 30)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if (timeInMillis <= System.currentTimeMillis()) {
-                add(Calendar.DAY_OF_YEAR, 1)
+        runCatching {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+            val intent = Intent(context, MorningShayariReceiver::class.java).apply {
+                action = MorningShayariReceiver.ACTION_MORNING_SHAYARI
             }
-        }
+            val pending = PendingIntent.getBroadcast(
+                context,
+                4011,
+                intent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
 
-        alarmManager.setInexactRepeating(
-            AlarmManager.RTC_WAKEUP,
-            nextMorning.timeInMillis,
-            AlarmManager.INTERVAL_DAY,
-            pending
-        )
+            val nextMorning = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 7)
+                set(Calendar.MINUTE, 30)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                if (timeInMillis <= System.currentTimeMillis()) {
+                    add(Calendar.DAY_OF_YEAR, 1)
+                }
+            }
+
+            alarmManager.setInexactRepeating(
+                AlarmManager.RTC_WAKEUP,
+                nextMorning.timeInMillis,
+                AlarmManager.INTERVAL_DAY,
+                pending
+            )
+        }
     }
 }

@@ -12,10 +12,12 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.example.HelloSirApplication
 import com.example.rtc.CallState
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
@@ -26,7 +28,8 @@ import kotlinx.coroutines.launch
  */
 class ActiveCallService : Service() {
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + exceptionHandler)
 
     @Volatile
     private var lastPeerName: String = "Hello Sir Call"
@@ -42,61 +45,65 @@ class ActiveCallService : Service() {
         serviceScope.launch {
             combine(controller.callState, controller.isMuted) { state, muted ->
                 state to muted
-            }.collect { (state, muted) ->
-                when (state) {
-                    is CallState.Idle -> {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                    }
-                    is CallState.Ended -> {
-                        // CallSessionController handles final teardown after short delay
-                    }
-                    is CallState.OutgoingRinging -> {
-                        lastPeerName = state.peerName
-                        lastIsVideo = state.isVideo
-                        notifyActiveCallUpdate(
-                            peerName = state.peerName,
-                            isVideo = state.isVideo,
-                            isConnected = false,
-                            connectedSinceMs = System.currentTimeMillis(),
-                            isMuted = muted
-                        )
-                    }
-                    is CallState.IncomingRinging -> {
-                        lastPeerName = state.callerName
-                        lastIsVideo = state.isVideo
-                        notifyActiveCallUpdate(
-                            peerName = state.callerName,
-                            isVideo = state.isVideo,
-                            isConnected = false,
-                            connectedSinceMs = System.currentTimeMillis(),
-                            isMuted = muted
-                        )
-                    }
-                    is CallState.Connecting -> {
-                        lastPeerName = state.peerName
-                        lastIsVideo = state.isVideo
-                        notifyActiveCallUpdate(
-                            peerName = state.peerName,
-                            isVideo = state.isVideo,
-                            isConnected = false,
-                            connectedSinceMs = System.currentTimeMillis(),
-                            isMuted = muted
-                        )
-                    }
-                    is CallState.Connected -> {
-                        lastPeerName = state.peerName
-                        lastIsVideo = state.isVideo
-                        notifyActiveCallUpdate(
-                            peerName = state.peerName,
-                            isVideo = state.isVideo,
-                            isConnected = true,
-                            connectedSinceMs = controller.getConnectedSinceMs(),
-                            isMuted = muted
-                        )
+            }
+                .catch { /* keep service resilient */ }
+                .collect { (state, muted) ->
+                    runCatching {
+                        when (state) {
+                            is CallState.Idle -> {
+                                runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                                runCatching { stopSelf() }
+                            }
+                            is CallState.Ended -> {
+                                // CallSessionController handles final teardown after short delay
+                            }
+                            is CallState.OutgoingRinging -> {
+                                lastPeerName = state.peerName
+                                lastIsVideo = state.isVideo
+                                notifyActiveCallUpdate(
+                                    peerName = state.peerName,
+                                    isVideo = state.isVideo,
+                                    isConnected = false,
+                                    connectedSinceMs = System.currentTimeMillis(),
+                                    isMuted = muted
+                                )
+                            }
+                            is CallState.IncomingRinging -> {
+                                lastPeerName = state.callerName
+                                lastIsVideo = state.isVideo
+                                notifyActiveCallUpdate(
+                                    peerName = state.callerName,
+                                    isVideo = state.isVideo,
+                                    isConnected = false,
+                                    connectedSinceMs = System.currentTimeMillis(),
+                                    isMuted = muted
+                                )
+                            }
+                            is CallState.Connecting -> {
+                                lastPeerName = state.peerName
+                                lastIsVideo = state.isVideo
+                                notifyActiveCallUpdate(
+                                    peerName = state.peerName,
+                                    isVideo = state.isVideo,
+                                    isConnected = false,
+                                    connectedSinceMs = System.currentTimeMillis(),
+                                    isMuted = muted
+                                )
+                            }
+                            is CallState.Connected -> {
+                                lastPeerName = state.peerName
+                                lastIsVideo = state.isVideo
+                                notifyActiveCallUpdate(
+                                    peerName = state.peerName,
+                                    isVideo = state.isVideo,
+                                    isConnected = true,
+                                    connectedSinceMs = controller.getConnectedSinceMs(),
+                                    isMuted = muted
+                                )
+                            }
+                        }
                     }
                 }
-            }
         }
     }
 

@@ -4,6 +4,7 @@ import android.net.Uri
 import com.example.core.security.GlobalSecurityEventBus
 import com.example.core.security.ServerStatus
 import com.example.core.security.SessionManager
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -104,7 +105,9 @@ class SignalingClient(
     private val okHttpClient: OkHttpClient,
     private val sessionManager: SessionManager
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, _ -> }
+    )
 
     private val _events = MutableSharedFlow<SignalingEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<SignalingEvent> = _events.asSharedFlow()
@@ -244,7 +247,7 @@ class SignalingClient(
 
     private fun closeSocketCleanly(reason: String) {
         isConnecting.set(false)
-        webSocket?.close(1000, reason)
+        runCatching { webSocket?.close(1000, reason) }
         webSocket = null
         _isConnected.value = false
     }
@@ -255,94 +258,105 @@ class SignalingClient(
 
     private fun openSocket(forceDuringCall: Boolean = false) {
         scope.launch {
-            if (!shouldStayConnected.get()) return@launch
-            if (!forceDuringCall && !isAppInForeground && !holdConnectionForCall) return@launch
-            val now = System.currentTimeMillis()
-            if ((_isConnected.value || isConnecting.get()) &&
-                webSocket != null &&
-                (now - lastConnectAttemptMs) < 12_000L
-            ) {
-                return@launch
-            }
-            val session = sessionManager.getCurrentSession() ?: return@launch
-            if (!isConnecting.compareAndSet(false, true)) {
-                if ((now - lastConnectAttemptMs) < 12_000L) return@launch
-            }
-            lastConnectAttemptMs = now
+            try {
+                if (!shouldStayConnected.get()) return@launch
+                if (!forceDuringCall && !isAppInForeground && !holdConnectionForCall) return@launch
+                val now = System.currentTimeMillis()
+                if ((_isConnected.value || isConnecting.get()) &&
+                    webSocket != null &&
+                    (now - lastConnectAttemptMs) < 12_000L
+                ) {
+                    return@launch
+                }
+                val session = sessionManager.getCurrentSession() ?: return@launch
+                if (!isConnecting.compareAndSet(false, true)) {
+                    if ((now - lastConnectAttemptMs) < 12_000L) return@launch
+                }
+                lastConnectAttemptMs = now
 
-            val wsUrl = "${NetworkModule.WS_URL}?userId=${Uri.encode(session.userId)}&deviceLockId=${Uri.encode(session.deviceLockId)}"
-            val request = Request.Builder()
-                .url(wsUrl)
-                .header("Authorization", "Bearer ${session.sessionToken}")
-                .header("X-Device-Lock", session.deviceLockId)
-                .build()
+                val wsUrl = "${NetworkModule.WS_URL}?userId=${Uri.encode(session.userId)}&deviceLockId=${Uri.encode(session.deviceLockId)}"
+                val safeToken = SecurityAuthInterceptor.sanitizeHeaderValue(session.sessionToken)
+                val safeLock = SecurityAuthInterceptor.sanitizeHeaderValue(session.deviceLockId)
+                val requestBuilder = Request.Builder().url(wsUrl)
+                if (safeToken.isNotEmpty()) {
+                    requestBuilder.header("Authorization", "Bearer $safeToken")
+                }
+                if (safeLock.isNotEmpty()) {
+                    requestBuilder.header("X-Device-Lock", safeLock)
+                }
+                val request = requestBuilder.build()
 
-            val oldSocket = webSocket
-            if (oldSocket != null && !_isConnected.value) {
-                oldSocket.cancel()
-            } else if (oldSocket != null) {
-                oldSocket.close(1000, "Reconnecting")
-            }
+                val oldSocket = webSocket
+                if (oldSocket != null && !_isConnected.value) {
+                    runCatching { oldSocket.cancel() }
+                } else if (oldSocket != null) {
+                    runCatching { oldSocket.close(1000, "Reconnecting") }
+                }
 
-            lateinit var currentSocket: WebSocket
-            currentSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    if (this@SignalingClient.webSocket !== webSocket) return
-                    isConnecting.set(false)
-                    _isConnected.value = true
-                    reconnectAttempt = 0
-                    GlobalSecurityEventBus.updateServerStatus(ServerStatus.READY)
-                    val onlineNow = isAppInForeground
-                    sendRaw(
-                        JSONObject().apply {
-                            put("type", "auth")
-                            put("userId", session.userId)
-                            put("displayName", session.displayName)
-                            put("deviceLockId", session.deviceLockId)
-                            put("isOnline", onlineNow)
-                            put("inForeground", onlineNow)
-                            put("status", if (onlineNow) "online" else "offline")
+                lateinit var currentSocket: WebSocket
+                currentSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        if (this@SignalingClient.webSocket !== webSocket) return
+                        isConnecting.set(false)
+                        _isConnected.value = true
+                        reconnectAttempt = 0
+                        GlobalSecurityEventBus.updateServerStatus(ServerStatus.READY)
+                        val onlineNow = isAppInForeground
+                        sendRaw(
+                            JSONObject().apply {
+                                put("type", "auth")
+                                put("userId", session.userId)
+                                put("displayName", session.displayName)
+                                put("deviceLockId", session.deviceLockId)
+                                put("isOnline", onlineNow)
+                                put("inForeground", onlineNow)
+                                put("status", if (onlineNow) "online" else "offline")
+                            }
+                        )
+                        sendPresenceFrame(session.userId, onlineNow)
+                        _events.tryEmit(SignalingEvent.SocketConnected)
+                        startHeartbeat(session.userId)
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        if (this@SignalingClient.webSocket !== webSocket) return
+                        parseAndDispatch(text)
+                    }
+
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        if (this@SignalingClient.webSocket !== webSocket) return
+                        isConnecting.set(false)
+                        _isConnected.value = false
+                        if (code == 4003 || reason.contains("403") || reason.contains("blocked", ignoreCase = true)) {
+                            GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                         }
-                    )
-                    sendPresenceFrame(session.userId, onlineNow)
-                    _events.tryEmit(SignalingEvent.SocketConnected)
-                    startHeartbeat(session.userId)
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (this@SignalingClient.webSocket !== webSocket) return
-                    parseAndDispatch(text)
-                }
-
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                    if (this@SignalingClient.webSocket !== webSocket) return
-                    isConnecting.set(false)
-                    _isConnected.value = false
-                    if (code == 4003 || reason.contains("403") || reason.contains("blocked", ignoreCase = true)) {
-                        GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
                     }
-                }
 
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (this@SignalingClient.webSocket !== webSocket) return
-                    isConnecting.set(false)
-                    _isConnected.value = false
-                    scheduleReconnect()
-                }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (this@SignalingClient.webSocket !== webSocket) return
-                    isConnecting.set(false)
-                    _isConnected.value = false
-                    if (response?.code == 403) {
-                        GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
-                        shouldStayConnected.set(false)
-                        return
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        if (this@SignalingClient.webSocket !== webSocket) return
+                        isConnecting.set(false)
+                        _isConnected.value = false
+                        scheduleReconnect()
                     }
-                    scheduleReconnect()
-                }
-            })
-            webSocket = currentSocket
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        if (this@SignalingClient.webSocket !== webSocket) return
+                        isConnecting.set(false)
+                        _isConnected.value = false
+                        if (response?.code == 403) {
+                            GlobalSecurityEventBus.emitBlocked("You are blocked by the administrator.")
+                            shouldStayConnected.set(false)
+                            return
+                        }
+                        scheduleReconnect()
+                    }
+                })
+                webSocket = currentSocket
+            } catch (_: Throwable) {
+                isConnecting.set(false)
+                _isConnected.value = false
+                scheduleReconnect()
+            }
         }
     }
 
@@ -1012,6 +1026,6 @@ class SignalingClient(
     }
 
     private fun sendRaw(json: JSONObject): Boolean {
-        return webSocket?.send(json.toString()) == true
+        return runCatching { webSocket?.send(json.toString()) == true }.getOrDefault(false)
     }
 }

@@ -44,7 +44,7 @@ import java.util.concurrent.Executors
 
 class WebRTCClient(
     private val context: Context,
-    private val eglBase: EglBase,
+    private val eglBase: EglBase?,
     private val onLocalSdpCreated: (SessionDescription) -> Unit,
     private val onIceCandidateGenerated: (IceCandidate) -> Unit,
     private val onConnectionStateChanged: (PeerConnection.IceConnectionState) -> Unit,
@@ -131,8 +131,9 @@ class WebRTCClient(
         audioDeviceModule.setSpeakerMute(false)
 
         // Constrained baseline (enableH264HighProfile = false) prevents hardware encoder stalls/freezes on mobile SoCs
-        val encoderFactory = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, false)
-        val decoderFactory = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
+        val eglContext = eglBase?.eglBaseContext
+        val encoderFactory = DefaultVideoEncoderFactory(eglContext, true, false)
+        val decoderFactory = DefaultVideoDecoderFactory(eglContext)
 
         peerConnectionFactory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(audioDeviceModule)
@@ -202,7 +203,7 @@ class WebRTCClient(
             isUsingFrontCamera = capturerSelection.isFront
             shouldBeCapturing = true
 
-            surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+            surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext)
             videoSource = peerConnectionFactory.createVideoSource(capturer.isScreencast)
             capturer.initialize(surfaceTextureHelper, appContext, createMonitoredCapturerObserver())
             cameraExecutor.execute {
@@ -534,7 +535,7 @@ class WebRTCClient(
                     captureHeight = 480
                     captureFps = 15
                     isUsingFrontCamera = selection.isFront
-                    surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+                    surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext)
                     freshCapturer.initialize(surfaceTextureHelper, appContext, createMonitoredCapturerObserver())
                     startCaptureSafely(freshCapturer, captureWidth, captureHeight, captureFps)
                     runOnMain {

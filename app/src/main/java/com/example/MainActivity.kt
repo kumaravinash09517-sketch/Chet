@@ -115,9 +115,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        ShayariManager.scheduleDailyMorningNotification(this)
-        requestNotificationPermissionIfNeeded()
-        handleDeepLinkIntent(intent)
+        runCatching { ShayariManager.scheduleDailyMorningNotification(this) }
+        runCatching { requestNotificationPermissionIfNeeded() }
+        runCatching { handleDeepLinkIntent(intent) }
 
         setContent {
             HelloSirTheme {
@@ -127,11 +127,13 @@ class MainActivity : ComponentActivity() {
                     pendingChatDeepLinkFlow = pendingChatDeepLink,
                     onConsumeChatDeepLink = { _pendingChatDeepLink.value = null },
                     onShowBlockedToast = {
-                        Toast.makeText(
-                            this,
-                            getString(R.string.blocked_message),
-                            Toast.LENGTH_LONG
-                        ).show()
+                        runCatching {
+                            Toast.makeText(
+                                this,
+                                getString(R.string.blocked_message),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
                     }
                 )
             }
@@ -140,43 +142,45 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        val app = application as HelloSirApplication
+        val app = application as? HelloSirApplication ?: return
         app.isUiInForeground = true
-        app.chatRepository.markLocalSelfPresence(true)
-        app.signalingClient.setAppForeground(true)
+        runCatching { app.chatRepository.markLocalSelfPresence(true) }
+        runCatching { app.signalingClient.setAppForeground(true) }
     }
 
     override fun onResume() {
         super.onResume()
-        val app = application as HelloSirApplication
+        val app = application as? HelloSirApplication ?: return
         app.isUiInForeground = true
-        app.chatRepository.markLocalSelfPresence(true)
-        app.signalingClient.setAppForeground(true)
-        callViewModel.onAppResumed()
+        runCatching { app.chatRepository.markLocalSelfPresence(true) }
+        runCatching { app.signalingClient.setAppForeground(true) }
+        runCatching { callViewModel.onAppResumed() }
         lifecycleScope.launch {
-            app.chatRepository.syncUserDirectory()
-            app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
+            runCatching { app.chatRepository.syncUserDirectory() }
+            runCatching { app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true) }
         }
     }
 
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
-            val app = application as HelloSirApplication
+            val app = application as? HelloSirApplication ?: return
             app.isUiInForeground = false
-            val keepSocket = app.callController.hasOngoingCall()
-            app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket)
-            app.chatRepository.markLocalSelfPresence(false)
+            val keepSocket = runCatching { app.callController.hasOngoingCall() }.getOrDefault(false)
+            runCatching { app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket) }
+            runCatching { app.chatRepository.markLocalSelfPresence(false) }
         }
     }
 
     override fun onDestroy() {
         if (!isChangingConfigurations && isFinishing) {
-            val app = application as HelloSirApplication
-            app.isUiInForeground = false
-            val keepSocket = app.callController.hasOngoingCall()
-            app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket)
-            app.chatRepository.markLocalSelfPresence(false)
+            val app = application as? HelloSirApplication
+            if (app != null) {
+                app.isUiInForeground = false
+                val keepSocket = runCatching { app.callController.hasOngoingCall() }.getOrDefault(false)
+                runCatching { app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket) }
+                runCatching { app.chatRepository.markLocalSelfPresence(false) }
+            }
         }
         super.onDestroy()
     }
@@ -184,13 +188,15 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleDeepLinkIntent(intent)
+        runCatching { handleDeepLinkIntent(intent) }
     }
 
     private fun enableCallLockscreenDisplay(dismissKeyguard: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
+            runCatching {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
             if (dismissKeyguard) {
                 val km = getSystemService(KeyguardManager::class.java)
                 if (km != null && km.isKeyguardLocked) {
@@ -219,7 +225,7 @@ class MainActivity : ComponentActivity() {
             val isVideo = intent.getBooleanExtra(NotificationHelper.EXTRA_IS_VIDEO, false)
             val sdp = intent.getStringExtra(NotificationHelper.EXTRA_OFFER_SDP) ?: return
             if (autoAccept) {
-                (application as HelloSirApplication).chatRepository.markCallAnswered(callId)
+                (application as? HelloSirApplication)?.chatRepository?.markCallAnswered(callId)
             }
             callViewModel.injectIncomingCallFromIntent(callId, callerId, callerName, isVideo, sdp)
             if (autoAccept) {
@@ -307,22 +313,24 @@ private fun HelloSirRoot(
         }
     }
 
-    LaunchedEffect(session, pendingChatDeepLink, showFullCallOverlay) {
-        val target = pendingChatDeepLink
-        if (session != null && target != null && !showFullCallOverlay) {
-            mainViewModel.openConversation(target.peerId, target.peerName)
-            navController.navigate(ChatRoute(target.peerId, target.peerName)) {
-                launchSingleTop = true
-            }
-            onConsumeChatDeepLink()
-        }
-    }
-
     if (!authResolved) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
         return
+    }
+
+    LaunchedEffect(authResolved, session, pendingChatDeepLink, showFullCallOverlay) {
+        val target = pendingChatDeepLink
+        if (authResolved && session != null && target != null && !showFullCallOverlay) {
+            mainViewModel.openConversation(target.peerId, target.peerName)
+            runCatching {
+                navController.navigate(ChatRoute(target.peerId, target.peerName)) {
+                    launchSingleTop = true
+                }
+            }
+            onConsumeChatDeepLink()
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -358,7 +366,7 @@ private fun HelloSirRoot(
                 onSwitchCamera = { callViewModel.switchCamera() }
             )
         } else {
-            val startDest: Any = if (session != null) HomeRoute else LoginRoute
+            val startDest: Any = remember(authResolved) { if (session != null) HomeRoute else LoginRoute }
 
             Column(modifier = Modifier.fillMaxSize()) {
                 if (callState !is CallState.Idle && isCallMinimized) {
@@ -389,8 +397,11 @@ private fun HelloSirRoot(
                 composable<LoginRoute> {
                     LaunchedEffect(session) {
                         if (session != null) {
-                            navController.navigate(HomeRoute) {
-                                popUpTo(LoginRoute) { inclusive = true }
+                            runCatching {
+                                navController.navigate(HomeRoute) {
+                                    popUpTo(LoginRoute) { inclusive = true }
+                                    launchSingleTop = true
+                                }
                             }
                         }
                     }
@@ -410,8 +421,11 @@ private fun HelloSirRoot(
                     val activeSession = session
                     if (activeSession == null) {
                         LaunchedEffect(Unit) {
-                            navController.navigate(LoginRoute) {
-                                popUpTo(0) { inclusive = true }
+                            runCatching {
+                                navController.navigate(LoginRoute) {
+                                    popUpTo(0) { inclusive = true }
+                                    launchSingleTop = true
+                                }
                             }
                         }
                     } else {
@@ -559,8 +573,10 @@ private fun HelloSirRoot(
                         .clickable {
                             activeInAppBanner = null
                             mainViewModel.openConversation(banner.peerId, banner.senderName)
-                            navController.navigate(ChatRoute(banner.peerId, banner.senderName)) {
-                                launchSingleTop = true
+                            runCatching {
+                                navController.navigate(ChatRoute(banner.peerId, banner.senderName)) {
+                                    launchSingleTop = true
+                                }
                             }
                         }
                 ) {

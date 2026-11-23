@@ -16,6 +16,7 @@ import com.example.data.local.UserEntity
 import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
 import com.example.platform.ShayariManager
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -48,23 +50,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as HelloSirApplication
     private val repository = app.chatRepository
     private val contactSyncHelper = app.contactSyncHelper
+    private val safeExceptionHandler = CoroutineExceptionHandler { _, _ -> }
 
-    val sessionState: StateFlow<UserSession?> = repository.sessionFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    private val _sessionState = MutableStateFlow<UserSession?>(null)
+    val sessionState: StateFlow<UserSession?> = _sessionState.asStateFlow()
 
     private val _authResolved = MutableStateFlow(false)
     val authResolved: StateFlow<Boolean> = _authResolved.asStateFlow()
 
     val conversations: StateFlow<List<ConversationEntity>> = repository.conversationsFlow
+        .catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val directoryUsers: StateFlow<List<UserEntity>> = repository.usersFlow
+        .catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val activeStatuses: StateFlow<List<StatusUpdateEntity>> = repository.statusesFlow
+        .catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val totalUnreadCount: StateFlow<Int?> = repository.totalUnreadCountFlow
+        .catch { emit(0) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val isBlockedByAdmin: StateFlow<Boolean> = GlobalSecurityEventBus.isBlocked
@@ -90,7 +97,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isSearchingUsers = MutableStateFlow(false)
     val isSearchingUsers: StateFlow<Boolean> = _isSearchingUsers.asStateFlow()
 
-    private val _currentShayari = MutableStateFlow(ShayariManager.nextShayariForAppOpen(app))
+    private val _currentShayari = MutableStateFlow(
+        runCatching { ShayariManager.nextShayariForAppOpen(app) }
+            .getOrElse { ShayariManager.shayariCollection.first() }
+    )
     val currentShayari: StateFlow<DailyShayari> = _currentShayari.asStateFlow()
 
     private val _isSavingProfile = MutableStateFlow(false)
@@ -105,32 +115,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var searchJob: Job? = null
 
     init {
-        ShayariManager.scheduleDailyMorningNotification(app)
-        viewModelScope.launch {
-            val deviceId = repository.getDeviceLockId()
+        runCatching { ShayariManager.scheduleDailyMorningNotification(app) }
+        viewModelScope.launch(safeExceptionHandler) {
+            val deviceId = runCatching { repository.getDeviceLockId() }.getOrDefault("")
             _loginFlowState.update { it.copy(deviceId = deviceId) }
-            repository.warmUpServer()
+            runCatching { repository.warmUpServer() }
         }
-        viewModelScope.launch {
-            repository.sessionFlow.collect { session ->
-                _authResolved.value = true
-                if (session != null) {
-                    if (app.isUiInForeground) {
-                        app.chatRepository.markLocalSelfPresence(true)
-                        app.signalingClient.setAppForeground(true)
+        viewModelScope.launch(safeExceptionHandler) {
+            repository.sessionFlow
+                .catch { emit(null) }
+                .collect { session ->
+                    _sessionState.value = session
+                    _authResolved.value = true
+                    if (session != null) {
+                        runCatching {
+                            if (app.isUiInForeground) {
+                                app.chatRepository.markLocalSelfPresence(true)
+                                app.signalingClient.setAppForeground(true)
+                            }
+                        }
+                        runCatching { app.startBackgroundSignalingService() }
+                        launch(safeExceptionHandler) { runCatching { repository.fetchIceServers() } }
+                        refreshDirectory()
+                        refreshStatuses()
                     }
-                    app.startBackgroundSignalingService()
-                    launch { repository.fetchIceServers() }
-                    refreshDirectory()
                 }
-            }
         }
-        viewModelScope.launch {
-            app.signalingClient.isConnected.collect { connected ->
-                if (connected && sessionState.value != null) {
-                    refreshDirectory()
+        viewModelScope.launch(safeExceptionHandler) {
+            app.signalingClient.isConnected
+                .catch { emit(false) }
+                .collect { connected ->
+                    if (connected && _sessionState.value != null) {
+                        refreshDirectory()
+                    }
                 }
-            }
         }
     }
 

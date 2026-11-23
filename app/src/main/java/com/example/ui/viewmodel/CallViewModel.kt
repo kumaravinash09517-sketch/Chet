@@ -13,7 +13,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as HelloSirApplication
     private val controller = app.callController
 
-    val eglBaseContext: EglBase.Context get() = controller.eglBaseContext
+    val eglBaseContext: EglBase.Context? get() = controller.eglBaseContext
 
     val callState: StateFlow<CallState> = controller.callState
     val isMuted: StateFlow<Boolean> = controller.isMuted
