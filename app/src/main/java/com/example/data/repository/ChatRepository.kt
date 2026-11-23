@@ -42,6 +42,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -1377,62 +1380,82 @@ class ChatRepository(
 
     suspend fun searchUsers(query: String): List<UserEntity> = withContext(Dispatchers.IO) {
         val clean = query.trim()
-        if (clean.isBlank()) return@withContext emptyList()
+        val cleanId = clean.removePrefix("@").trim().ifBlank { clean }
+        if (cleanId.isBlank()) return@withContext emptyList()
 
-        val digits = clean.filter { it.isDigit() }
-        val normalizedPhone = if (digits.length >= 10) PhoneAuthUtils.normalizePhoneNumber(clean) else null
+        val digits = cleanId.filter { it.isDigit() }
+        val normalizedPhone = if (digits.length >= 10) PhoneAuthUtils.normalizePhoneNumber(cleanId) else null
 
         val remoteFound = linkedMapOf<String, UserEntity>()
-        suspend fun collectFromCall(call: suspend () -> retrofit2.Response<okhttp3.ResponseBody>) {
-            runCatching {
+        suspend fun fetchSafe(call: suspend () -> retrofit2.Response<okhttp3.ResponseBody>): List<UserEntity> {
+            return runCatching {
                 val resp = call()
                 if (resp.isSuccessful) {
-                    val parsed = BackendJsonParsers.parseUsersFromBody(resp.body()?.string())
-                    parsed.mapNotNull { it.toUserEntity() }.forEach { user ->
-                        remoteFound[user.userId] = user
+                    BackendJsonParsers.parseUsersFromBody(resp.body()?.string())
+                        .mapNotNull { it.toUserEntity() }
+                } else {
+                    emptyList()
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        // Run User ID, general query, and phone searches in parallel for fast response
+        val batches = coroutineScope {
+            val calls = mutableListOf(
+                async { fetchSafe { apiService.findUsers(cleanId) } },
+                async { fetchSafe { apiService.findUsersByUserId(cleanId) } },
+                async { fetchSafe { apiService.searchUsers(cleanId) } }
+            )
+            if (normalizedPhone != null && normalizedPhone != cleanId) {
+                calls.add(async { fetchSafe { apiService.findUsersByPhone(normalizedPhone) } })
+            }
+            calls.awaitAll()
+        }
+
+        val currentSession = sessionManager.getCurrentSession()
+        val app = context.applicationContext as? HelloSirApplication
+        val nowMs = System.currentTimeMillis()
+
+        batches.flatten().forEach { user ->
+            val key = user.userId.lowercase(Locale.ROOT)
+            val resolvedOnline = when {
+                currentSession != null && user.userId.equals(currentSession.userId, ignoreCase = true) ->
+                    signalingClient.isAppInForeground || (app?.isUiInForeground == true)
+                else -> {
+                    val cached = recentPresenceUpdates[key]
+                    if (cached != null && (nowMs - cached.second) < 15_000L) {
+                        cached.first
+                    } else {
+                        user.isOnline
                     }
                 }
             }
-        }
-
-        // Primary: /api/users/find
-        collectFromCall { apiService.findUsers(clean) }
-
-        if (remoteFound.isEmpty() && normalizedPhone != null && normalizedPhone != clean) {
-            collectFromCall { apiService.findUsers(normalizedPhone) }
-        }
-        if (remoteFound.isEmpty() && normalizedPhone != null) {
-            collectFromCall { apiService.findUsersByPhone(normalizedPhone) }
-        }
-        if (remoteFound.isEmpty() && (clean.startsWith("u_", ignoreCase = true) || clean.startsWith("@"))) {
-            collectFromCall { apiService.findUsersByUserId(clean.removePrefix("@")) }
-        }
-        if (remoteFound.isEmpty()) {
-            collectFromCall { apiService.findUsersByQuery(clean) }
-        }
-        // Fallback: /api/users/search
-        if (remoteFound.isEmpty()) {
-            collectFromCall { apiService.searchUsers(clean) }
+            remoteFound[key] = user.copy(isOnline = resolvedOnline)
         }
 
         if (remoteFound.isNotEmpty()) {
             userDao.upsertUsers(remoteFound.values.toList())
         } else {
-            // Ensure local directory has latest registered users from /api/users
             syncUserDirectory()
         }
 
         val localMerged = linkedMapOf<String, UserEntity>()
-        remoteFound.values.forEach { localMerged[it.userId] = it }
-        userDao.searchUsers(clean).forEach { localMerged.putIfAbsent(it.userId, it) }
+        remoteFound.forEach { (k, v) -> localMerged[k] = v }
+        userDao.searchUsers(cleanId).forEach { localMerged.putIfAbsent(it.userId.lowercase(Locale.ROOT), it) }
         if (digits.length >= 4) {
-            userDao.searchUsers(digits).forEach { localMerged.putIfAbsent(it.userId, it) }
+            userDao.searchUsers(digits).forEach { localMerged.putIfAbsent(it.userId.lowercase(Locale.ROOT), it) }
             val tail10 = digits.takeLast(10)
             if (tail10 != digits) {
-                userDao.searchUsers(tail10).forEach { localMerged.putIfAbsent(it.userId, it) }
+                userDao.searchUsers(tail10).forEach { localMerged.putIfAbsent(it.userId.lowercase(Locale.ROOT), it) }
             }
         }
-        return@withContext localMerged.values.toList()
+        return@withContext localMerged.values.sortedWith(
+            compareByDescending<UserEntity> {
+                it.userId.equals(cleanId, ignoreCase = true) || it.displayName.equals(cleanId, ignoreCase = true)
+            }.thenByDescending {
+                it.userId.startsWith(cleanId, ignoreCase = true) || it.displayName.startsWith(cleanId, ignoreCase = true)
+            }.thenByDescending { it.lastLoginMillis }
+        )
     }
 
     suspend fun startOrOpenConversation(peerId: String, peerName: String) = withContext(Dispatchers.IO) {
@@ -2042,16 +2065,17 @@ class ChatRepository(
         headline: String,
         unreadCount: Int = 1
     ) {
-        if (!notifiedMessageIds.add(message.id)) return
-        while (notifiedMessageIds.size > 400) {
-            val first = notifiedMessageIds.firstOrNull() ?: break
-            notifiedMessageIds.remove(first)
-        }
         val app = context.applicationContext as? HelloSirApplication
         val isViewingThisChat = app != null &&
             app.isUiInForeground &&
             app.activeChatPeerId.equals(peerId, ignoreCase = true)
         if (isViewingThisChat) return
+
+        if (!notifiedMessageIds.add(message.id)) return
+        while (notifiedMessageIds.size > 400) {
+            val first = notifiedMessageIds.firstOrNull() ?: break
+            notifiedMessageIds.remove(first)
+        }
 
         GlobalSecurityEventBus.emitIncomingMessageAlert(
             IncomingMessageAlert(

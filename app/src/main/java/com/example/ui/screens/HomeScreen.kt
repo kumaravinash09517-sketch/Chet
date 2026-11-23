@@ -138,48 +138,67 @@ fun HomeScreen(
         if (searchQuery.isBlank()) conversations
         else {
             val q = searchQuery.trim()
-            val qDigits = q.filter { it.isDigit() }
-            conversations.filter {
-                it.peerName.contains(q, ignoreCase = true) ||
-                    it.peerPhone.contains(q, ignoreCase = true) ||
-                    it.peerId.contains(q, ignoreCase = true) ||
-                    it.lastMessagePreview.contains(q, ignoreCase = true) ||
-                    (qDigits.length >= 4 && (
-                        it.peerPhone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
-                            it.peerId.filter { ch -> ch.isDigit() }.contains(qDigits)
-                        ))
-            }
+            val qNoAt = q.removePrefix("@").trim().ifBlank { q }
+            val qDigits = qNoAt.filter { it.isDigit() }
+            conversations
+                .filter {
+                    it.peerName.contains(qNoAt, ignoreCase = true) ||
+                        it.peerPhone.contains(qNoAt, ignoreCase = true) ||
+                        it.peerId.contains(qNoAt, ignoreCase = true) ||
+                        it.lastMessagePreview.contains(qNoAt, ignoreCase = true) ||
+                        (qDigits.length >= 4 && (
+                            it.peerPhone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
+                                it.peerId.filter { ch -> ch.isDigit() }.contains(qDigits)
+                            ))
+                }
+                .sortedWith(
+                    compareByDescending<ConversationEntity> {
+                        it.peerId.equals(qNoAt, ignoreCase = true) || it.peerName.equals(qNoAt, ignoreCase = true)
+                    }.thenByDescending {
+                        it.peerId.startsWith(qNoAt, ignoreCase = true) || it.peerName.startsWith(qNoAt, ignoreCase = true)
+                    }.thenByDescending { it.lastMessageTimestamp }
+                )
         }
     }
 
     val filteredUsers = remember(directoryUsers, remoteSearchResults, searchQuery) {
         val merged = (remoteSearchResults + directoryUsers)
-            .distinctBy { it.userId }
+            .distinctBy { it.userId.lowercase() }
             .sortedByDescending { it.lastLoginMillis }
         if (searchQuery.isBlank()) merged
         else {
             val q = searchQuery.trim()
-            val qDigits = q.filter { it.isDigit() }
-            val remoteIds = remoteSearchResults.map { it.userId }.toSet()
-            merged.filter { user ->
-                user.userId in remoteIds ||
-                    user.displayName.contains(q, ignoreCase = true) ||
-                    user.phone.contains(q, ignoreCase = true) ||
-                    user.userId.contains(q, ignoreCase = true) ||
-                    (qDigits.length >= 4 && (
-                        user.phone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
-                            user.userId.filter { ch -> ch.isDigit() }.contains(qDigits)
-                        ))
-            }
+            val qNoAt = q.removePrefix("@").trim().ifBlank { q }
+            val qDigits = qNoAt.filter { it.isDigit() }
+            val remoteIds = remoteSearchResults.map { it.userId.lowercase() }.toSet()
+            merged
+                .filter { user ->
+                    user.userId.lowercase() in remoteIds ||
+                        user.displayName.contains(qNoAt, ignoreCase = true) ||
+                        user.phone.contains(qNoAt, ignoreCase = true) ||
+                        user.userId.contains(qNoAt, ignoreCase = true) ||
+                        (qDigits.length >= 4 && (
+                            user.phone.filter { ch -> ch.isDigit() }.contains(qDigits) ||
+                                user.userId.filter { ch -> ch.isDigit() }.contains(qDigits)
+                            ))
+                }
+                .sortedWith(
+                    compareByDescending<UserEntity> {
+                        it.userId.equals(qNoAt, ignoreCase = true) || it.displayName.equals(qNoAt, ignoreCase = true)
+                    }.thenByDescending {
+                        it.userId.startsWith(qNoAt, ignoreCase = true) || it.displayName.startsWith(qNoAt, ignoreCase = true)
+                    }.thenByDescending { it.lastLoginMillis }
+                )
         }
     }
 
     val peopleSearchMatches = remember(filteredUsers, filteredConversations, searchQuery, session.userId) {
         if (searchQuery.isBlank()) emptyList()
         else {
-            val existingPeerIds = filteredConversations.map { it.peerId }.toSet()
+            val existingPeerIds = filteredConversations.map { it.peerId.lowercase() }.toSet()
             filteredUsers.filter {
-                !it.userId.equals(session.userId, ignoreCase = true) && it.userId !in existingPeerIds
+                !it.userId.equals(session.userId, ignoreCase = true) &&
+                    it.userId.lowercase() !in existingPeerIds
             }
         }
     }
@@ -408,6 +427,7 @@ fun HomeScreen(
                         ) { conv ->
                             ConversationRow(
                                 conversation = conv,
+                                showUserId = searchQuery.isNotBlank(),
                                 onClick = { onOpenChat(conv.peerId, conv.peerName) }
                             )
                             HorizontalDivider(
@@ -572,6 +592,7 @@ fun UserAvatarCircle(
 @Composable
 private fun ConversationRow(
     conversation: ConversationEntity,
+    showUserId: Boolean = false,
     onClick: () -> Unit
 ) {
     Row(
@@ -596,14 +617,29 @@ private fun ConversationRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = conversation.peerName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
-                )
+                ) {
+                    Text(
+                        text = conversation.peerName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (showUserId) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "@${conversation.peerId}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = formatShortTime(conversation.lastMessageTimestamp),

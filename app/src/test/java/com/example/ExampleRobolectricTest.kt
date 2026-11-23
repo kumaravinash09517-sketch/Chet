@@ -1014,10 +1014,83 @@ class ExampleRobolectricTest {
             sessionManager = sessionManager
         )
         org.junit.Assert.assertFalse(client.isConnectingOrConnected())
-        client.setAppForeground(false)
+        client.setAppForeground(false, keepSocketForCall = true)
         org.junit.Assert.assertFalse(client.isAppInForeground)
 
         sessionManager.clearSession()
         assertEquals(null, sessionManager.getCurrentSession())
+    }
+
+    @Test
+    fun `activeCallNotification provides reopen intent, ongoing CallStyle chronometer, and Mute + HangUp actions`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.platform.NotificationHelper.createChannels(context)
+
+        val notification = com.example.platform.NotificationHelper.buildActiveCallNotification(
+            context = context,
+            peerName = "Sandeep",
+            isVideo = true,
+            isConnected = true,
+            connectedSinceMs = 1_763_900_000_000L,
+            isMuted = false
+        )
+        assertTrue((notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)
+        org.junit.Assert.assertNotNull(notification.contentIntent)
+        assertTrue(notification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_CHRONOMETER))
+        val actionTitles = notification.actions.orEmpty().mapNotNull { it.title?.toString() }
+        assertTrue(actionTitles.any { it.contains("Mute", ignoreCase = true) })
+
+        val mutedNotification = com.example.platform.NotificationHelper.buildActiveCallNotification(
+            context = context,
+            peerName = "Sandeep",
+            isVideo = false,
+            isConnected = true,
+            connectedSinceMs = 1_763_900_000_000L,
+            isMuted = true
+        )
+        val mutedTitles = mutedNotification.actions.orEmpty().mapNotNull { it.title?.toString() }
+        assertTrue(mutedTitles.any { it.contains("Unmute", ignoreCase = true) })
+    }
+
+    @Test
+    fun `userDao searchUsers finds matches case-insensitively by User ID and Name`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val userDao = db.userDao()
+            userDao.upsertUsers(
+                listOf(
+                    com.example.data.local.UserEntity(
+                        userId = "vk_01",
+                        displayName = "Avinash Verma",
+                        phone = "+919455877902",
+                        lastLoginMillis = 3000L,
+                        lastLoginFormatted = "now"
+                    ),
+                    com.example.data.local.UserEntity(
+                        userId = "sandeep_92",
+                        displayName = "Sandeep Kumar",
+                        phone = "+919250903007",
+                        lastLoginMillis = 2000L,
+                        lastLoginFormatted = "earlier"
+                    )
+                )
+            )
+            val byUpperUserId = userDao.searchUsers("VK_01")
+            assertEquals(1, byUpperUserId.size)
+            assertEquals("Avinash Verma", byUpperUserId.first().displayName)
+
+            val byAtPrefixNormalized = userDao.searchUsers("@sandeep_92".removePrefix("@"))
+            assertEquals(1, byAtPrefixNormalized.size)
+            assertEquals("sandeep_92", byAtPrefixNormalized.first().userId)
+
+            val byLowerName = userDao.searchUsers("avinash")
+            assertEquals(1, byLowerName.size)
+            assertEquals("vk_01", byLowerName.first().userId)
+        } finally {
+            db.close()
+        }
     }
 }

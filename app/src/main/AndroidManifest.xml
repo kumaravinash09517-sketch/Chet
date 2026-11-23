@@ -57,11 +57,13 @@
         <service
             android:name=".platform.SignalingForegroundService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
 
         <service
             android:name=".platform.ActiveCallService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="microphone|camera" />
 
         <receiver
@@ -70,6 +72,8 @@
             <intent-filter>
                 <action android:name="com.example.ACTION_DECLINE_CALL" />
                 <action android:name="com.example.ACTION_REPLY_MESSAGE" />
+                <action android:name="com.example.ACTION_HANGUP_CALL" />
+                <action android:name="com.example.ACTION_TOGGLE_MUTE" />
             </intent-filter>
         </receiver>
 

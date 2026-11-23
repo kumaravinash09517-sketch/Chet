@@ -114,12 +114,16 @@ class SignalingClient(
     var isAppInForeground: Boolean = false
         private set
 
+    @Volatile
+    private var holdConnectionForCall: Boolean = false
+
     fun isConnectingOrConnected(): Boolean =
         (_isConnected.value || isConnecting.get()) && webSocket != null
 
-    fun setAppForeground(inForeground: Boolean) {
+    fun setAppForeground(inForeground: Boolean, keepSocketForCall: Boolean = false) {
         val changed = isAppInForeground != inForeground
         isAppInForeground = inForeground
+        holdConnectionForCall = keepSocketForCall
         if (inForeground) {
             backgroundDisconnectJob?.cancel()
             backgroundDisconnectJob = null
@@ -134,6 +138,19 @@ class SignalingClient(
             } else if (!isConnecting.get() || webSocket == null) {
                 openSocket()
             }
+        } else if (keepSocketForCall) {
+            // Keep WebSocket open for active call signaling while still reporting background presence
+            backgroundDisconnectJob?.cancel()
+            backgroundDisconnectJob = null
+            shouldStayConnected.set(true)
+            if (_isConnected.value && webSocket != null) {
+                scope.launch {
+                    val userId = sessionManager.getCurrentSession()?.userId ?: return@launch
+                    sendPresenceFrame(userId, false)
+                }
+            } else {
+                openSocket(forceDuringCall = true)
+            }
         } else {
             shouldStayConnected.set(false)
             reconnectJob?.cancel()
@@ -145,7 +162,7 @@ class SignalingClient(
                     sendPresenceFrame(userId, false)
                     delay(140L)
                 }
-                if (!isAppInForeground) {
+                if (!isAppInForeground && !holdConnectionForCall) {
                     closeSocketCleanly("App moved to background")
                     if (userId.isNotBlank()) {
                         _events.tryEmit(SignalingEvent.PresenceChanged(userId, false))
@@ -226,7 +243,7 @@ class SignalingClient(
     private fun openSocket(forceDuringCall: Boolean = false) {
         scope.launch {
             if (!shouldStayConnected.get()) return@launch
-            if (!forceDuringCall && !isAppInForeground) return@launch
+            if (!forceDuringCall && !isAppInForeground && !holdConnectionForCall) return@launch
             val now = System.currentTimeMillis()
             if ((_isConnected.value || isConnecting.get()) &&
                 webSocket != null &&
@@ -337,7 +354,7 @@ class SignalingClient(
     }
 
     private fun scheduleReconnect() {
-        if (!shouldStayConnected.get() || !isAppInForeground) return
+        if (!shouldStayConnected.get() || (!isAppInForeground && !holdConnectionForCall)) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             reconnectAttempt++
@@ -347,8 +364,8 @@ class SignalingClient(
                 else -> (1_500L * (reconnectAttempt - 1)).coerceAtMost(10_000L)
             }
             delay(backoffMs)
-            if (shouldStayConnected.get() && isAppInForeground) {
-                openSocket()
+            if (shouldStayConnected.get() && (isAppInForeground || holdConnectionForCall)) {
+                openSocket(forceDuringCall = holdConnectionForCall)
             }
         }
     }

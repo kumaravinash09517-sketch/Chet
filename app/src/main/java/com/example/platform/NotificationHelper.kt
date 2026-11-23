@@ -17,6 +17,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
@@ -45,7 +46,11 @@ object NotificationHelper {
     const val EXTRA_PEER_ID = "extra_peer_id"
     const val EXTRA_PEER_NAME = "extra_peer_name"
     const val EXTRA_OPEN_CALL = "extra_open_call"
+    const val EXTRA_REOPEN_CALL = "extra_reopen_call"
     const val EXTRA_OPEN_CHAT = "extra_open_chat"
+    const val EXTRA_IS_CONNECTED = "extra_is_connected"
+    const val EXTRA_CONNECTED_SINCE_MS = "extra_connected_since_ms"
+    const val EXTRA_IS_MUTED = "extra_is_muted"
     const val KEY_TEXT_REPLY = "key_text_reply"
 
     @Volatile
@@ -143,23 +148,80 @@ object NotificationHelper {
             .build()
     }
 
-    fun buildActiveCallNotification(context: Context, peerName: String, isVideo: Boolean): Notification {
+    fun buildActiveCallNotification(
+        context: Context,
+        peerName: String,
+        isVideo: Boolean,
+        isConnected: Boolean = false,
+        connectedSinceMs: Long = System.currentTimeMillis(),
+        isMuted: Boolean = false
+    ): Notification {
         val openIntent = PendingIntent.getActivity(
             context,
-            1,
-            Intent(context, MainActivity::class.java),
+            201,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                putExtra(EXTRA_REOPEN_CALL, true)
+            },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val hangUpIntent = PendingIntent.getBroadcast(
+            context,
+            202,
+            Intent(context, CallNotificationReceiver::class.java).apply {
+                action = CallNotificationReceiver.ACTION_HANGUP_CALL
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val toggleMuteIntent = PendingIntent.getBroadcast(
+            context,
+            203,
+            Intent(context, CallNotificationReceiver::class.java).apply {
+                action = CallNotificationReceiver.ACTION_TOGGLE_MUTE
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val safePeerName = peerName.trim().ifBlank { "Hello Sir Call" }
         val typeLabel = if (isVideo) "Video call" else "Voice call"
-        return NotificationCompat.Builder(context, CHANNEL_CALLS)
+        val statusLine = when {
+            isConnected && isMuted -> "Ongoing $typeLabel • Muted • Tap to return"
+            isConnected -> "Ongoing $typeLabel • Tap to return"
+            else -> "$typeLabel connecting… • Tap to return"
+        }
+
+        val callerPerson = Person.Builder()
+            .setName(safePeerName)
+            .setImportant(true)
+            .build()
+
+        val muteAction = NotificationCompat.Action.Builder(
+            android.R.drawable.ic_btn_speak_now,
+            if (isMuted) "Unmute" else "Mute",
+            toggleMuteIntent
+        ).build()
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_CALLS)
             .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-            .setContentTitle("$typeLabel with $peerName")
-            .setContentText("Tap to return to call")
+            .setContentTitle("$typeLabel with $safePeerName")
+            .setContentText(statusLine)
             .setOngoing(true)
             .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setWhen(if (isConnected && connectedSinceMs > 0L) connectedSinceMs else System.currentTimeMillis())
+            .setShowWhen(isConnected)
+            .setUsesChronometer(isConnected)
             .setContentIntent(openIntent)
-            .build()
+            .setStyle(NotificationCompat.CallStyle.forOngoingCall(callerPerson, hangUpIntent))
+            .addAction(muteAction)
+
+        return builder.build()
     }
 
     fun showIncomingCallNotification(

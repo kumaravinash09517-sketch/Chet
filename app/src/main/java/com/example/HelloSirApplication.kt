@@ -17,6 +17,7 @@ import com.example.platform.ContactSyncHelper
 import com.example.platform.LocationHelper
 import com.example.platform.NotificationHelper
 import com.example.platform.SignalingForegroundService
+import com.example.rtc.CallSessionController
 
 class HelloSirApplication : Application(), ImageLoaderFactory {
 
@@ -27,6 +28,8 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
     lateinit var signalingClient: SignalingClient
         private set
     lateinit var chatRepository: ChatRepository
+        private set
+    lateinit var callController: CallSessionController
         private set
     lateinit var contactSyncHelper: ContactSyncHelper
         private set
@@ -44,7 +47,8 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     isUiInForeground = false
-                    signalingClient.setAppForeground(false)
+                    val hasOngoingCall = ::callController.isInitialized && callController.hasOngoingCall()
+                    signalingClient.setAppForeground(false, keepSocketForCall = hasOngoingCall)
                     chatRepository.markLocalSelfPresence(false)
                 }
             }
@@ -72,6 +76,7 @@ class HelloSirApplication : Application(), ImageLoaderFactory {
             sessionManager = sessionManager,
             mediaHttpClient = mediaHttpClient
         )
+        callController = CallSessionController(this)
         contactSyncHelper = ContactSyncHelper(this)
         locationHelper = LocationHelper(this)
 

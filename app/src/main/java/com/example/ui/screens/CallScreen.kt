@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Outline
 import android.view.View
 import android.view.ViewOutlineProvider
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Cameraswitch
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.Videocam
@@ -80,6 +82,7 @@ fun CallScreen(
     onAcceptIncoming: () -> Unit,
     onDeclineIncoming: () -> Unit,
     onHangUp: () -> Unit,
+    onMinimizeCall: () -> Unit = {},
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onToggleVideo: () -> Unit,
@@ -115,6 +118,10 @@ fun CallScreen(
     }
 
     val isActiveCall = callState !is CallState.Idle && callState !is CallState.Ended
+
+    BackHandler(enabled = isActiveCall && callState !is CallState.IncomingRinging) {
+        onMinimizeCall()
+    }
 
     val showRemoteVideo = isVideoCall && callState is CallState.Connected && hasRemoteVideo
     val showLocalPreview = isVideoCall && isVideoEnabled && (
@@ -288,6 +295,8 @@ fun CallScreen(
                         }
                         if (appliedPipMode != isPipMode) {
                             appliedPipMode = isPipMode
+                            view.setZOrderMediaOverlay(true)
+                            view.bringToFront()
                             if (isPipMode) {
                                 view.clipToOutline = true
                                 view.outlineProvider = object : ViewOutlineProvider() {
@@ -322,6 +331,29 @@ fun CallScreen(
                         )
                     )
             )
+        }
+
+        // Top-left minimize button so user can jump back to chats while keeping active call bar + notification alive
+        if (isActiveCall && callState !is CallState.IncomingRinging) {
+            Surface(
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.42f),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 16.dp, top = 16.dp)
+                    .size(48.dp)
+                    .testTag("minimize_call_button")
+            ) {
+                IconButton(onClick = onMinimizeCall) {
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = "Minimize Call",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            }
         }
 
         // Top Call Identity Header

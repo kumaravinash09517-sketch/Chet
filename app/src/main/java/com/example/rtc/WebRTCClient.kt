@@ -18,6 +18,7 @@ import org.webrtc.Camera1Enumerator
 import org.webrtc.Camera2Enumerator
 import org.webrtc.CameraEnumerator
 import org.webrtc.CameraVideoCapturer
+import org.webrtc.CapturerObserver
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -35,6 +36,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoFrame
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -80,14 +82,30 @@ class WebRTCClient(
     private var isCapturing = false
     @Volatile
     private var hasReceivedFirstFrame = false
+    @Volatile
+    private var lastCapturedFrameMs = 0L
     private var lastFreezeRecoveryMs = 0L
     private var freezeRecoveryCount = 0
     private var isUsingFrontCamera = true
     private var hasAudioFocus = false
 
     private val firstFrameWatchdogRunnable = Runnable {
-        if (shouldBeCapturing && !hasReceivedFirstFrame) {
+        if (!isReleased && shouldBeCapturing && !hasReceivedFirstFrame) {
             recoverFrozenOrStoppedCamera(escalateToCamera1 = true)
+        }
+    }
+
+    private val cameraKeepAliveRunnable = object : Runnable {
+        override fun run() {
+            if (isReleased || !shouldBeCapturing) return
+            val now = System.currentTimeMillis()
+            val frameStalled = hasReceivedFirstFrame &&
+                lastCapturedFrameMs > 0L &&
+                (now - lastCapturedFrameMs) > 3_500L
+            if (!isCapturing || videoCapturer == null || frameStalled) {
+                recoverFrozenOrStoppedCamera(escalateToCamera1 = true)
+            }
+            mainHandler.postDelayed(this, 3_000L)
         }
     }
 
@@ -186,7 +204,7 @@ class WebRTCClient(
 
             surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
             videoSource = peerConnectionFactory.createVideoSource(capturer.isScreencast)
-            capturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
+            capturer.initialize(surfaceTextureHelper, appContext, createMonitoredCapturerObserver())
             cameraExecutor.execute {
                 if (!isReleased && shouldBeCapturing) {
                     startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
@@ -195,6 +213,7 @@ class WebRTCClient(
             localVideoTrack = peerConnectionFactory.createVideoTrack("HELLO_SIR_VIDEO", videoSource).apply {
                 setEnabled(true)
             }
+            scheduleCameraKeepAlive()
             onCameraFacingChanged(capturerSelection.isFront)
             runOnMain {
                 localRenderer?.let { sink ->
@@ -205,6 +224,7 @@ class WebRTCClient(
         } else {
             shouldBeCapturing = true
             localVideoTrack?.setEnabled(true)
+            scheduleCameraKeepAlive()
             if (!isCapturing) {
                 val capturer = videoCapturer
                 if (capturer != null) {
@@ -249,7 +269,8 @@ class WebRTCClient(
             PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
             PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
             PeerConnection.IceServer.builder("stun:stun3.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun4.l.google.com:19302").createIceServer()
+            PeerConnection.IceServer.builder("stun:stun4.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
         )
         customIceServers.forEach { dto ->
             if (dto.urls.isNotEmpty()) {
@@ -263,6 +284,11 @@ class WebRTCClient(
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+            rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
+            audioJitterBufferMaxPackets = 80
+            audioJitterBufferFastAccelerate = true
             iceCandidatePoolSize = 4
         }
 
@@ -324,6 +350,7 @@ class WebRTCClient(
         localAudioTrack?.let {
             peerConnection?.addTrack(it, listOf("HELLO_SIR_STREAM"))
             localAudioAdded = true
+            configureAudioSenderParameters()
         }
         if (isVideo) {
             val videoTrack = localVideoTrack
@@ -344,6 +371,22 @@ class WebRTCClient(
         }
     }
 
+    private fun configureAudioSenderParameters() {
+        val pc = peerConnection ?: return
+        runCatching {
+            val audioSender = pc.senders.firstOrNull {
+                it.track()?.kind() == MediaStreamTrack.AUDIO_TRACK_KIND
+            } ?: return
+            val params = audioSender.parameters ?: return
+            params.encodings.forEach { enc ->
+                enc.maxBitrateBps = 40_000
+                enc.networkPriority = 3
+                enc.bitratePriority = 4.0
+            }
+            audioSender.parameters = params
+        }
+    }
+
     private fun configureVideoSenderParameters() {
         val pc = peerConnection ?: return
         runCatching {
@@ -351,11 +394,13 @@ class WebRTCClient(
                 it.track()?.kind() == MediaStreamTrack.VIDEO_TRACK_KIND
             } ?: return
             val params = videoSender.parameters ?: return
-            params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            // BALANCED degrades gracefully under weak signal without freezing frames or starving voice
+            params.degradationPreference = RtpParameters.DegradationPreference.BALANCED
             params.encodings.forEach { enc ->
-                enc.maxBitrateBps = 1_200_000
-                enc.minBitrateBps = 180_000
+                enc.maxBitrateBps = 900_000
+                enc.minBitrateBps = 120_000
                 enc.maxFramerate = 24
+                enc.networkPriority = 1
             }
             videoSender.parameters = params
         }
@@ -422,6 +467,40 @@ class WebRTCClient(
         }
     }
 
+    private fun createMonitoredCapturerObserver(): CapturerObserver {
+        return object : CapturerObserver {
+            override fun onCapturerStarted(success: Boolean) {
+                isCapturing = success
+                runCatching { videoSource?.capturerObserver?.onCapturerStarted(success) }
+            }
+
+            override fun onCapturerStopped() {
+                isCapturing = false
+                runCatching { videoSource?.capturerObserver?.onCapturerStopped() }
+            }
+
+            override fun onFrameCaptured(frame: VideoFrame?) {
+                if (frame != null) {
+                    lastCapturedFrameMs = System.currentTimeMillis()
+                    if (!hasReceivedFirstFrame) {
+                        hasReceivedFirstFrame = true
+                        isCapturing = true
+                        freezeRecoveryCount = 0
+                        mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
+                    }
+                    runCatching { videoSource?.capturerObserver?.onFrameCaptured(frame) }
+                }
+            }
+        }
+    }
+
+    private fun scheduleCameraKeepAlive() {
+        mainHandler.removeCallbacks(cameraKeepAliveRunnable)
+        if (!isReleased && shouldBeCapturing) {
+            mainHandler.postDelayed(cameraKeepAliveRunnable, 3_000L)
+        }
+    }
+
     private fun recoverFrozenOrStoppedCamera(escalateToCamera1: Boolean = false) {
         val now = System.currentTimeMillis()
         if (isReleased || !shouldBeCapturing) return
@@ -456,7 +535,7 @@ class WebRTCClient(
                     captureFps = 15
                     isUsingFrontCamera = selection.isFront
                     surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
-                    freshCapturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
+                    freshCapturer.initialize(surfaceTextureHelper, appContext, createMonitoredCapturerObserver())
                     startCaptureSafely(freshCapturer, captureWidth, captureHeight, captureFps)
                     runOnMain {
                         if (isReleased) return@runOnMain
@@ -474,8 +553,14 @@ class WebRTCClient(
 
     fun restartVideoCaptureIfActive() {
         if (isReleased || !shouldBeCapturing) return
+        scheduleCameraKeepAlive()
+        val now = System.currentTimeMillis()
+        val frameFresh = lastCapturedFrameMs > 0L && (now - lastCapturedFrameMs) < 2_500L
         // Do not tear down or interrupt a healthy streaming camera
-        if (isCapturing && hasReceivedFirstFrame) return
+        if (isCapturing && hasReceivedFirstFrame && frameFresh) {
+            localVideoTrack?.setEnabled(true)
+            return
+        }
         val capturer = videoCapturer ?: run {
             ensureVideoCaptureStarted()
             return
@@ -558,10 +643,13 @@ class WebRTCClient(
         }
     }
 
-    fun createOffer(isVideo: Boolean) {
+    fun createOffer(isVideo: Boolean, iceRestart: Boolean = false) {
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", isVideo.toString()))
+            if (iceRestart) {
+                mandatory.add(MediaConstraints.KeyValuePair("IceRestart", "true"))
+            }
         }
         peerConnection?.createOffer(
             SimpleSdpObserver(
@@ -569,6 +657,7 @@ class WebRTCClient(
                     peerConnection?.setLocalDescription(
                         SimpleSdpObserver(
                             onSet = {
+                                configureAudioSenderParameters()
                                 if (isVideo) configureVideoSenderParameters()
                                 onLocalSdpCreated(sdp)
                             }
@@ -579,6 +668,11 @@ class WebRTCClient(
             ),
             constraints
         )
+    }
+
+    fun restartIce(isVideo: Boolean) {
+        if (isReleased || peerConnection == null) return
+        createOffer(isVideo = isVideo, iceRestart = true)
     }
 
     fun handleRemoteOfferAndCreateAnswer(offerSdp: String, isVideo: Boolean) {
@@ -596,6 +690,7 @@ class WebRTCClient(
                                 peerConnection?.setLocalDescription(
                                     SimpleSdpObserver(
                                         onSet = {
+                                            configureAudioSenderParameters()
                                             if (isVideo) configureVideoSenderParameters()
                                             onLocalSdpCreated(answerSdp)
                                         }
@@ -692,6 +787,7 @@ class WebRTCClient(
         }
         localVideoTrack?.setEnabled(enabled)
         if (enabled) {
+            scheduleCameraKeepAlive()
             val capturer = videoCapturer
             if (capturer != null && !isCapturing) {
                 cameraExecutor.execute {
@@ -709,7 +805,9 @@ class WebRTCClient(
         } else {
             isCapturing = false
             hasReceivedFirstFrame = false
+            lastCapturedFrameMs = 0L
             mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
+            mainHandler.removeCallbacks(cameraKeepAliveRunnable)
             val capturer = videoCapturer
             if (capturer != null) {
                 cameraExecutor.execute {
@@ -802,8 +900,10 @@ class WebRTCClient(
         shouldBeCapturing = false
         isCapturing = false
         hasReceivedFirstFrame = false
+        lastCapturedFrameMs = 0L
         hasAudioFocus = false
         mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
+        mainHandler.removeCallbacks(cameraKeepAliveRunnable)
         runOnMain {
             localRenderer?.let { sink -> runCatching { localVideoTrack?.removeSink(sink) } }
             remoteRenderer?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }

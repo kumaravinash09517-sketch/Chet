@@ -35,6 +35,8 @@ sealed interface CallNotificationAction {
         val isVideo: Boolean,
         val offerSdp: String
     ) : CallNotificationAction
+    data object Hangup : CallNotificationAction
+    data object ToggleMute : CallNotificationAction
 }
 
 object GlobalSecurityEventBus {

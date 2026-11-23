@@ -218,8 +218,18 @@ class SessionManager(private val context: Context) {
     }
 
     suspend fun getCurrentSession(): UserSession? {
+        if (durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
+            cachedSession = null
+            return null
+        }
         cachedSession?.let { return it }
-        return sessionFlow.first().also { cachedSession = it }
+        val loaded = sessionFlow.first()
+        if (durablePrefs.getBoolean(PREF_EXPLICITLY_LOGGED_OUT, false)) {
+            cachedSession = null
+            return null
+        }
+        cachedSession = loaded
+        return loaded
     }
 
     suspend fun getOrCreateDeviceLockId(): String {

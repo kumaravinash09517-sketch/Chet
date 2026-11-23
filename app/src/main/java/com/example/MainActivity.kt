@@ -19,20 +19,27 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -50,10 +57,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import java.util.Locale
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -154,7 +164,8 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations) {
             val app = application as HelloSirApplication
             app.isUiInForeground = false
-            app.signalingClient.setAppForeground(false)
+            val keepSocket = app.callController.hasOngoingCall()
+            app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket)
             app.chatRepository.markLocalSelfPresence(false)
         }
     }
@@ -163,7 +174,8 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations && isFinishing) {
             val app = application as HelloSirApplication
             app.isUiInForeground = false
-            app.signalingClient.setAppForeground(false)
+            val keepSocket = app.callController.hasOngoingCall()
+            app.signalingClient.setAppForeground(false, keepSocketForCall = keepSocket)
             app.chatRepository.markLocalSelfPresence(false)
         }
         super.onDestroy()
@@ -190,6 +202,11 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLinkIntent(intent: Intent?) {
         intent ?: return
+        if (intent.getBooleanExtra(NotificationHelper.EXTRA_REOPEN_CALL, false)) {
+            enableCallLockscreenDisplay(dismissKeyguard = false)
+            callViewModel.expandCall()
+            return
+        }
         if (intent.getBooleanExtra(NotificationHelper.EXTRA_OPEN_CALL, false)) {
             val autoAccept = intent.getBooleanExtra(NotificationHelper.EXTRA_AUTO_ACCEPT, false)
             if (autoAccept) {
@@ -258,7 +275,10 @@ private fun HelloSirRoot(
     val isBlocked by mainViewModel.isBlockedByAdmin.collectAsStateWithLifecycle()
     val currentShayari by mainViewModel.currentShayari.collectAsStateWithLifecycle()
     val callState by callViewModel.callState.collectAsStateWithLifecycle()
+    val isCallMinimized by callViewModel.isCallMinimized.collectAsStateWithLifecycle()
+    val callDurationSeconds by callViewModel.callDurationSeconds.collectAsStateWithLifecycle()
     val pendingChatDeepLink by pendingChatDeepLinkFlow.collectAsStateWithLifecycle()
+    val showFullCallOverlay = callState !is CallState.Idle && !isCallMinimized
 
     var activeInAppBanner by remember { mutableStateOf<IncomingMessageAlert?>(null) }
 
@@ -283,9 +303,9 @@ private fun HelloSirRoot(
         }
     }
 
-    LaunchedEffect(session, pendingChatDeepLink, callState) {
+    LaunchedEffect(session, pendingChatDeepLink, showFullCallOverlay) {
         val target = pendingChatDeepLink
-        if (session != null && target != null && callState is CallState.Idle) {
+        if (session != null && target != null && !showFullCallOverlay) {
             mainViewModel.openConversation(target.peerId, target.peerName)
             navController.navigate(ChatRoute(target.peerId, target.peerName)) {
                 launchSingleTop = true
@@ -302,14 +322,13 @@ private fun HelloSirRoot(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Active / Incoming Call Overlay takes precedence over navigation stack
-        if (callState !is CallState.Idle) {
+        // Active / Incoming Call Overlay takes precedence over navigation stack unless minimized
+        if (showFullCallOverlay) {
             val isMuted by callViewModel.isMuted.collectAsStateWithLifecycle()
             val isSpeaker by callViewModel.isSpeakerOn.collectAsStateWithLifecycle()
             val isVideoEnabled by callViewModel.isVideoEnabled.collectAsStateWithLifecycle()
             val isFrontCamera by callViewModel.isFrontCamera.collectAsStateWithLifecycle()
             val hasRemoteVideo by callViewModel.hasRemoteVideo.collectAsStateWithLifecycle()
-            val duration by callViewModel.callDurationSeconds.collectAsStateWithLifecycle()
 
             CallScreen(
                 callState = callState,
@@ -319,7 +338,7 @@ private fun HelloSirRoot(
                 isVideoEnabled = isVideoEnabled,
                 isFrontCamera = isFrontCamera,
                 hasRemoteVideo = hasRemoteVideo,
-                durationSeconds = duration,
+                durationSeconds = callDurationSeconds,
                 onAttachRenderers = { local, remote, forceRebind ->
                     callViewModel.attachRenderers(local, remote, forceRebind)
                 },
@@ -328,6 +347,7 @@ private fun HelloSirRoot(
                 onAcceptIncoming = { callViewModel.acceptIncomingCall() },
                 onDeclineIncoming = { callViewModel.declineIncomingCall() },
                 onHangUp = { callViewModel.hangUp() },
+                onMinimizeCall = { callViewModel.minimizeCall() },
                 onToggleMute = { callViewModel.toggleMute() },
                 onToggleSpeaker = { callViewModel.toggleSpeaker() },
                 onToggleVideo = { callViewModel.toggleVideo() },
@@ -336,10 +356,32 @@ private fun HelloSirRoot(
         } else {
             val startDest: Any = if (session != null) HomeRoute else LoginRoute
 
-            NavHost(
-                navController = navController,
-                startDestination = startDest
-            ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                if (callState !is CallState.Idle && isCallMinimized) {
+                    ActiveCallStatusBar(
+                        callState = callState,
+                        durationSeconds = callDurationSeconds,
+                        onReopenCall = { callViewModel.expandCall() },
+                        onHangUp = { callViewModel.hangUp() }
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .then(
+                            if (callState !is CallState.Idle && isCallMinimized) {
+                                Modifier.consumeWindowInsets(WindowInsets.statusBars)
+                            } else {
+                                Modifier
+                            }
+                        )
+                ) {
+                    NavHost(
+                        navController = navController,
+                        startDestination = startDest
+                    ) {
                 composable<LoginRoute> {
                     LaunchedEffect(session) {
                         if (session != null) {
@@ -464,11 +506,13 @@ private fun HelloSirRoot(
                     // Direct call state handled by CallState overlay above
                 }
             }
+                }
+            }
         }
 
         // In-App Message Notification Banner with Sender Name + Headline
         AnimatedVisibility(
-            visible = activeInAppBanner != null && session != null && callState is CallState.Idle,
+            visible = activeInAppBanner != null && session != null && !showFullCallOverlay,
             enter = slideInVertically { -it } + fadeIn(),
             exit = slideOutVertically { -it } + fadeOut(),
             modifier = Modifier
@@ -553,5 +597,102 @@ private fun HelloSirRoot(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun ActiveCallStatusBar(
+    callState: CallState,
+    durationSeconds: Long,
+    onReopenCall: () -> Unit,
+    onHangUp: () -> Unit
+) {
+    val peerName = when (callState) {
+        is CallState.OutgoingRinging -> callState.peerName
+        is CallState.IncomingRinging -> callState.callerName
+        is CallState.Connecting -> callState.peerName
+        is CallState.Connected -> callState.peerName
+        else -> "Call"
+    }
+    val isVideo = when (callState) {
+        is CallState.OutgoingRinging -> callState.isVideo
+        is CallState.IncomingRinging -> callState.isVideo
+        is CallState.Connecting -> callState.isVideo
+        is CallState.Connected -> callState.isVideo
+        else -> false
+    }
+    val statusSuffix = when (callState) {
+        is CallState.Connected -> {
+            val mins = durationSeconds / 60
+            val secs = durationSeconds % 60
+            String.format(Locale.US, "%02d:%02d", mins, secs)
+        }
+        is CallState.OutgoingRinging -> if (callState.isRingingOnRemote) "Ringing" else "Calling"
+        is CallState.IncomingRinging -> "Incoming"
+        is CallState.Connecting -> "Connecting"
+        else -> ""
+    }
+
+    Surface(
+        color = com.example.ui.theme.EmeraldPrimary,
+        contentColor = Color.White,
+        shadowElevation = 6.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onReopenCall)
+            .testTag("active_call_bar_reopen")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = if (isVideo) Icons.Rounded.Videocam else Icons.Rounded.Call,
+                    contentDescription = "Tap to return to call",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "$peerName • $statusSuffix",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Tap to return to call",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.88f)
+                    )
+                }
+            }
+            Surface(
+                shape = CircleShape,
+                color = com.example.ui.theme.CrimsonAlert,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("active_call_bar_hangup")
+            ) {
+                IconButton(onClick = onHangUp) {
+                    Icon(
+                        imageVector = Icons.Rounded.CallEnd,
+                        contentDescription = "End Call",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
     }
 }

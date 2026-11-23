@@ -16,9 +16,9 @@ interface UserDao {
 
     @Query(
         "SELECT * FROM users " +
-            "WHERE displayName LIKE '%' || :query || '%' " +
-            "OR phone LIKE '%' || :query || '%' " +
-            "OR userId LIKE '%' || :query || '%' " +
+            "WHERE LOWER(displayName) LIKE '%' || LOWER(:query) || '%' " +
+            "OR LOWER(phone) LIKE '%' || LOWER(:query) || '%' " +
+            "OR LOWER(userId) LIKE '%' || LOWER(:query) || '%' " +
             "ORDER BY lastLoginMillis DESC"
     )
     suspend fun searchUsers(query: String): List<UserEntity>

@@ -128,7 +128,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
         searchJob?.cancel()
-        if (query.trim().length < 2) {
+        val trimmed = query.trim().removePrefix("@").trim()
+        if (trimmed.isEmpty()) {
             _remoteSearchResults.value = emptyList()
             _isSearchingUsers.value = false
             return
@@ -136,7 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isSearchingUsers.value = true
         searchJob = viewModelScope.launch {
             try {
-                delay(250L)
+                delay(120L)
                 _remoteSearchResults.value = repository.searchUsers(query)
             } finally {
                 _isSearchingUsers.value = false

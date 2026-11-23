@@ -4,6 +4,8 @@ import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import androidx.core.app.RemoteInput
 import com.example.HelloSirApplication
 import com.example.core.security.CallNotificationAction
@@ -17,6 +19,8 @@ class CallNotificationReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_DECLINE_CALL = "com.example.ACTION_DECLINE_CALL"
         const val ACTION_REPLY_MESSAGE = "com.example.ACTION_REPLY_MESSAGE"
+        const val ACTION_HANGUP_CALL = "com.example.ACTION_HANGUP_CALL"
+        const val ACTION_TOGGLE_MUTE = "com.example.ACTION_TOGGLE_MUTE"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -42,6 +46,23 @@ class CallNotificationReceiver : BroadcastReceiver() {
                         )
                     } finally {
                         pendingResult.finish()
+                    }
+                }
+            }
+            ACTION_HANGUP_CALL -> {
+                NotificationHelper.stopRingtoneAndVibrate(context)
+                Handler(Looper.getMainLooper()).post {
+                    if (app.callController.hasOngoingCall()) {
+                        app.callController.hangUp()
+                    } else {
+                        runCatching { context.stopService(Intent(context, ActiveCallService::class.java)) }
+                    }
+                }
+            }
+            ACTION_TOGGLE_MUTE -> {
+                Handler(Looper.getMainLooper()).post {
+                    if (app.callController.hasOngoingCall()) {
+                        app.callController.toggleMute()
                     }
                 }
             }

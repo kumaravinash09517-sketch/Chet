@@ -75,15 +75,15 @@ class SignalingForegroundService : Service() {
         serviceScope.launch {
             var tick = 0
             while (isActive) {
-                delay(3_000L)
-                val session = app.sessionManager.getCurrentSession() ?: continue
-                if (app.isUiInForeground) continue
-
-                tick++
-                if (tick % 3 == 1) {
-                    runCatching { app.chatRepository.syncUserDirectory() }
+                val session = app.sessionManager.getCurrentSession()
+                if (session != null && !app.isUiInForeground) {
+                    tick++
+                    if (tick == 1 || tick % 3 == 0) {
+                        runCatching { app.chatRepository.syncUserDirectory() }
+                    }
+                    runCatching { app.chatRepository.pollBackgroundMessagesForNotifications(session.userId) }
                 }
-                runCatching { app.chatRepository.pollBackgroundMessagesForNotifications(session.userId) }
+                delay(2_500L)
             }
         }
     }
@@ -92,6 +92,8 @@ class SignalingForegroundService : Service() {
         val app = application as HelloSirApplication
         if (app.isUiInForeground) {
             app.signalingClient.setAppForeground(true)
+        } else if (app.callController.hasOngoingCall()) {
+            app.signalingClient.setAppForeground(false, keepSocketForCall = true)
         }
         return START_STICKY
     }
