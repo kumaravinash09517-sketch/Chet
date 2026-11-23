@@ -950,4 +950,74 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `backendJsonParsers marks loggedOut and inactive session users strictly offline and parses server message ids`() {
+        val users = com.example.data.remote.BackendJsonParsers.parseUsersFromBody(
+            """
+            {
+              "users": [
+                {"userId":"u_logged_out","displayName":"LoggedOut","isOnline":true,"loggedOut":true},
+                {"userId":"u_not_logged_in","displayName":"NotLoggedIn","isOnline":true,"isLoggedIn":false},
+                {"userId":"u_inactive_sess","displayName":"InactiveSess","online":true,"activeSession":false},
+                {"userId":"u_active_now","displayName":"ActiveNow","isOnline":true,"isLoggedIn":true,"inForeground":true}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(4, users.size)
+        org.junit.Assert.assertFalse(users[0].resolvedIsOnline())
+        org.junit.Assert.assertFalse(users[1].resolvedIsOnline())
+        org.junit.Assert.assertFalse(users[2].resolvedIsOnline())
+        assertTrue(users[3].resolvedIsOnline())
+
+        assertEquals(
+            "srv_msg_101",
+            com.example.data.remote.BackendJsonParsers.parseSendMessageServerId(
+                """{"success":true,"message":{"_id":"srv_msg_101","status":"sent"}}"""
+            )
+        )
+        assertEquals(
+            "srv_msg_202",
+            com.example.data.remote.BackendJsonParsers.parseSendMessageServerId(
+                """{"success":true,"message_id":"srv_msg_202"}"""
+            )
+        )
+        assertEquals(
+            null,
+            com.example.data.remote.BackendJsonParsers.parseSendMessageServerId("""{"success":true}""")
+        )
+    }
+
+    @Test
+    fun `signalingClient tracks foreground state cleanly and sessionManager cache resets on logout`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sessionManager = com.example.core.security.SessionManager(context)
+        sessionManager.clearSession()
+
+        sessionManager.saveSession(
+            userId = "vk",
+            displayName = "avinash",
+            phone = "+919455877902",
+            avatarUrl = null,
+            serverToken = "tok_vk_1",
+            registeredAtMillis = 1_763_900_000_000L,
+            registeredAtFormatted = "22 Nov 2026, 11:00 PM"
+        )
+        assertEquals("vk", sessionManager.getCurrentSession()?.userId)
+
+        sessionManager.simulateUpdateKeyRotationForTest()
+        assertEquals("vk", sessionManager.getCurrentSession()?.userId)
+
+        val client = com.example.data.remote.SignalingClient(
+            okHttpClient = okhttp3.OkHttpClient(),
+            sessionManager = sessionManager
+        )
+        org.junit.Assert.assertFalse(client.isConnectingOrConnected())
+        client.setAppForeground(false)
+        org.junit.Assert.assertFalse(client.isAppInForeground)
+
+        sessionManager.clearSession()
+        assertEquals(null, sessionManager.getCurrentSession())
+    }
 }

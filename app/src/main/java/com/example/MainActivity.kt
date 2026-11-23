@@ -132,26 +132,21 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val app = application as HelloSirApplication
         app.isUiInForeground = true
-        app.signalingClient.setAppForeground(true)
         app.chatRepository.markLocalSelfPresence(true)
+        app.signalingClient.setAppForeground(true)
     }
 
     override fun onResume() {
         super.onResume()
         val app = application as HelloSirApplication
         app.isUiInForeground = true
-        app.signalingClient.setAppForeground(true)
         app.chatRepository.markLocalSelfPresence(true)
+        app.signalingClient.setAppForeground(true)
         callViewModel.onAppResumed()
         lifecycleScope.launch {
             app.chatRepository.syncUserDirectory()
             app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
         }
-    }
-
-    override fun onPause() {
-        (application as HelloSirApplication).isUiInForeground = false
-        super.onPause()
     }
 
     override fun onStop() {
@@ -162,6 +157,16 @@ class MainActivity : ComponentActivity() {
             app.signalingClient.setAppForeground(false)
             app.chatRepository.markLocalSelfPresence(false)
         }
+    }
+
+    override fun onDestroy() {
+        if (!isChangingConfigurations && isFinishing) {
+            val app = application as HelloSirApplication
+            app.isUiInForeground = false
+            app.signalingClient.setAppForeground(false)
+            app.chatRepository.markLocalSelfPresence(false)
+        }
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {

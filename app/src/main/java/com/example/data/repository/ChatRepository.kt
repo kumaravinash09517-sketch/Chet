@@ -68,6 +68,7 @@ import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 object PhoneAuthUtils {
     fun normalizePhoneNumber(raw: String): String {
@@ -352,6 +353,7 @@ class ChatRepository(
 
     private val notifiedMessageIds: MutableSet<String> = Collections.synchronizedSet(LinkedHashSet())
     private val activeVideoDownloads: MutableSet<String> = Collections.synchronizedSet(HashSet())
+    private val recentPresenceUpdates = ConcurrentHashMap<String, Pair<Boolean, Long>>()
 
     val sessionFlow: Flow<UserSession?> = sessionManager.sessionFlow
     val conversationsFlow: Flow<List<ConversationEntity>> = conversationDao.observeConversations()
@@ -413,7 +415,12 @@ class ChatRepository(
     fun markLocalSelfPresence(online: Boolean) {
         scope.launch {
             val myId = sessionManager.getCurrentSession()?.userId ?: return@launch
-            userDao.updateOnlineStatus(myId, online)
+            recentPresenceUpdates[myId.lowercase(Locale.ROOT)] = online to System.currentTimeMillis()
+            if (online) {
+                userDao.updateOnlineStatus(myId, true)
+            } else {
+                userDao.clearAllOnlineStatuses()
+            }
         }
     }
 
@@ -424,7 +431,7 @@ class ChatRepository(
                 usersFlow.first()
                     .filter { !it.userId.equals(myId, ignoreCase = true) }
                     .map { it.userId }
-            ).distinct().take(12)
+            ).distinct().take(25)
         for (peerId in peerIds) {
             runCatching { syncMessagesWithServer(peerId) }
         }
@@ -433,9 +440,10 @@ class ChatRepository(
     private fun startDirectoryAndConversationRefreshLoop() {
         directoryRefreshJob?.cancel()
         directoryRefreshJob = scope.launch {
+            runCatching { syncUserDirectory() }
             while (isActive) {
                 val fg = signalingClient.isAppInForeground
-                delay(if (fg) 7_000L else 15_000L)
+                delay(if (fg) 4_000L else 12_000L)
                 val myId = sessionManager.getCurrentSession()?.userId ?: continue
                 runCatching { syncUserDirectory() }
                 if (signalingClient.isAppInForeground) {
@@ -445,7 +453,7 @@ class ChatRepository(
                                 usersFlow.first()
                                     .filter { !it.userId.equals(myId, ignoreCase = true) }
                                     .map { it.userId }
-                            ).distinct().take(12)
+                            ).distinct().take(20)
                         for (peerId in peers) {
                             syncMessagesWithServer(peerId)
                         }
@@ -703,6 +711,8 @@ class ChatRepository(
                         conversationDao.updatePeerTyping(event.userId, event.isTyping)
                     }
                     is SignalingEvent.PresenceChanged -> {
+                        recentPresenceUpdates[event.userId.lowercase(Locale.ROOT)] =
+                            event.isOnline to System.currentTimeMillis()
                         val existingUser = userDao.getUser(event.userId)
                         if (existingUser != null) {
                             userDao.updateOnlineStatus(event.userId, event.isOnline)
@@ -1275,8 +1285,31 @@ class ChatRepository(
                         }
                     }
                 }
-                val mapped = remoteUsers.mapNotNull { it.toUserEntity() }
                 val currentSession = sessionManager.getCurrentSession()
+                val hardwareDeviceId = sessionManager.getOrCreateDeviceLockId()
+                val nowMs = System.currentTimeMillis()
+                val mapped = remoteUsers.mapNotNull { dto ->
+                    val entity = dto.toUserEntity() ?: return@mapNotNull null
+                    val uidLower = entity.userId.lowercase(Locale.ROOT)
+                    val isSelf = currentSession != null &&
+                        entity.userId.equals(currentSession.userId, ignoreCase = true)
+                    if (isSelf) {
+                        entity
+                    } else {
+                        // Enforce single-active-account per device: any old/other account bound to this phone is strictly Offline
+                        val sameDeviceInactiveAccount = !dto.deviceIdSnake.isNullOrBlank() &&
+                            dto.deviceIdSnake.equals(hardwareDeviceId, ignoreCase = true)
+                        val recentWs = recentPresenceUpdates[uidLower]
+                            ?.takeIf { (_, ts) -> (nowMs - ts) < 15_000L }
+                            ?.first
+                        val resolvedOnline = when {
+                            sameDeviceInactiveAccount -> false
+                            recentWs != null -> recentWs
+                            else -> entity.isOnline
+                        }
+                        entity.copy(isOnline = resolvedOnline)
+                    }
+                }
                 if (currentSession != null &&
                     mapped.any { it.userId.equals(currentSession.userId, ignoreCase = true) && it.isBlocked }
                 ) {
@@ -1290,6 +1323,8 @@ class ChatRepository(
                 if (currentSession != null) {
                     val selfKey = currentSession.userId.lowercase(Locale.ROOT)
                     val existingSelf = mergedMap[selfKey]
+                    val app = context.applicationContext as? HelloSirApplication
+                    val selfInForeground = signalingClient.isAppInForeground || (app?.isUiInForeground == true)
                     mergedMap[selfKey] = UserEntity(
                         userId = existingSelf?.userId ?: currentSession.userId,
                         displayName = currentSession.displayName.ifBlank { existingSelf?.displayName ?: currentSession.userId },
@@ -1299,7 +1334,7 @@ class ChatRepository(
                         lastLoginFormatted = currentSession.registeredAtFormatted.ifBlank {
                             existingSelf?.lastLoginFormatted ?: formatDateTime(System.currentTimeMillis())
                         },
-                        isOnline = signalingClient.isAppInForeground && signalingClient.isConnected.value,
+                        isOnline = selfInForeground,
                         isBlocked = existingSelf?.isBlocked ?: false
                     )
                 }
@@ -1469,11 +1504,18 @@ class ChatRepository(
                     if (latest != null) {
                         val existing = conversationDao.getConversation(peerId)
                         val peerUser = userDao.getUser(peerId)
-                        val newestTimestamp = maxOf(
-                            latest.timestamp,
-                            newlyReceivedFromPeer.maxOfOrNull { it.timestamp } ?: 0L,
-                            existing?.lastMessageTimestamp ?: 0L
-                        )
+                        val newestTimestamp = if (newlyReceivedFromPeer.isNotEmpty()) {
+                            maxOf(
+                                latest.timestamp,
+                                System.currentTimeMillis(),
+                                (existing?.lastMessageTimestamp ?: 0L) + 1L
+                            )
+                        } else {
+                            maxOf(
+                                latest.timestamp,
+                                existing?.lastMessageTimestamp ?: 0L
+                            )
+                        }
                         conversationDao.upsertConversation(
                             ConversationEntity(
                                 peerId = peerId,
@@ -1752,6 +1794,7 @@ class ChatRepository(
             signalingClient.connect()
         }
         var finalStatus = if (wsSent) MessageStatus.SENT else MessageStatus.PENDING
+        var resolvedId = entity.id
 
         try {
             var response = apiService.sendMessage(req)
@@ -1760,7 +1803,12 @@ class ChatRepository(
                 response = apiService.sendMessageSnakeCase(req.toSnakeCase())
             }
             if (response.isSuccessful) {
-                val ackStatus = BackendJsonParsers.parseSendMessageStatus(response.body()?.string())
+                val respBodyStr = response.body()?.string()
+                val ackStatus = BackendJsonParsers.parseSendMessageStatus(respBodyStr)
+                val serverId = BackendJsonParsers.parseSendMessageServerId(respBodyStr)
+                if (!serverId.isNullOrBlank() && serverId != entity.id) {
+                    resolvedId = serverId
+                }
                 val parsed = ackStatus?.let {
                     runCatching { MessageStatus.valueOf(it) }.getOrDefault(MessageStatus.SENT)
                 } ?: MessageStatus.SENT
@@ -1772,8 +1820,11 @@ class ChatRepository(
 
         val currentStored = messageDao.getMessageById(entity.id)
         val mergedStatus = maxStatus(currentStored?.status ?: entity.status, finalStatus)
-        messageDao.upsertMessage(entity.copy(status = mergedStatus))
-        conversationDao.updateLastMessageStatus(entity.conversationId, entity.id, mergedStatus)
+        if (resolvedId != entity.id) {
+            messageDao.deleteMessageHard(entity.id)
+        }
+        val persistedEntity = entity.copy(id = resolvedId, status = mergedStatus)
+        messageDao.upsertMessage(persistedEntity)
         val existing = conversationDao.getConversation(entity.conversationId)
         if (existing == null) {
             val peerUser = userDao.getUser(entity.conversationId)
@@ -1783,10 +1834,21 @@ class ChatRepository(
                     peerName = peerUser?.displayName ?: peerName,
                     peerPhone = peerUser?.phone.orEmpty(),
                     peerAvatarUrl = peerUser?.avatarUrl,
-                    lastMessageId = entity.id,
-                    lastMessagePreview = previewForMessage(entity),
-                    lastMessageType = entity.type,
-                    lastMessageTimestamp = entity.timestamp,
+                    lastMessageId = resolvedId,
+                    lastMessagePreview = previewForMessage(persistedEntity),
+                    lastMessageType = persistedEntity.type,
+                    lastMessageTimestamp = persistedEntity.timestamp,
+                    lastMessageStatus = mergedStatus,
+                    lastMessageIsMine = true
+                )
+            )
+        } else {
+            conversationDao.upsertConversation(
+                existing.copy(
+                    lastMessageId = resolvedId,
+                    lastMessagePreview = previewForMessage(persistedEntity),
+                    lastMessageType = persistedEntity.type,
+                    lastMessageTimestamp = maxOf(existing.lastMessageTimestamp, persistedEntity.timestamp),
                     lastMessageStatus = mergedStatus,
                     lastMessageIsMine = true
                 )
@@ -1929,6 +1991,12 @@ class ChatRepository(
         }
         val headline = previewForMessage(entity)
 
+        val sortTimestamp = if (!isMine && existingMsg == null) {
+            maxOf(entity.timestamp, System.currentTimeMillis(), (existingConv?.lastMessageTimestamp ?: 0L) + 1L)
+        } else {
+            maxOf(entity.timestamp, existingConv?.lastMessageTimestamp ?: 0L)
+        }
+
         conversationDao.upsertConversation(
             ConversationEntity(
                 peerId = peerId,
@@ -1939,7 +2007,7 @@ class ChatRepository(
                 lastMessageId = entity.id,
                 lastMessagePreview = headline,
                 lastMessageType = entity.type,
-                lastMessageTimestamp = maxOf(entity.timestamp, existingConv?.lastMessageTimestamp ?: 0L),
+                lastMessageTimestamp = sortTimestamp,
                 lastMessageStatus = entity.status,
                 lastMessageIsMine = isMine,
                 unreadCount = newUnread,

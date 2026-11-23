@@ -154,7 +154,10 @@ fun CallScreen(
         CallState.Idle -> "idle"
     }
 
-    // Request RECORD_AUDIO (and CAMERA for video calls) automatically during active call phases
+    var hasActivatedAudio by remember(isActiveCall) { mutableStateOf(false) }
+    var hasActivatedCamera by remember(isActiveCall, isVideoCall) { mutableStateOf(false) }
+
+    // Request RECORD_AUDIO (and CAMERA for video calls) once permissions are ready without re-resetting mid-call
     LaunchedEffect(isVideoCall, callPhaseKey) {
         if (callPhaseKey in setOf("out", "conn", "live")) {
             val missing = buildList {
@@ -168,8 +171,12 @@ fun CallScreen(
             if (missing.isNotEmpty()) {
                 callPermissionLauncher.launch(missing.toTypedArray())
             } else {
-                onAudioPermissionGranted()
-                if (isVideoCall && isVideoEnabled) {
+                if (!hasActivatedAudio) {
+                    hasActivatedAudio = true
+                    onAudioPermissionGranted()
+                }
+                if (isVideoCall && isVideoEnabled && !hasActivatedCamera) {
+                    hasActivatedCamera = true
                     onCameraPermissionGranted()
                 }
             }
@@ -237,6 +244,9 @@ fun CallScreen(
                     val targetVis = if (showRemoteVideo) View.VISIBLE else View.INVISIBLE
                     if (view.visibility != targetVis) {
                         view.visibility = targetVis
+                        if (targetVis == View.VISIBLE) {
+                            view.requestLayout()
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxSize()

@@ -946,7 +946,23 @@ object BackendJsonParsers {
             "is_foreground",
             "foreground"
         )
+        val explicitlyLoggedOut = hasExplicitTrue(
+            obj,
+            "loggedOut",
+            "logged_out",
+            "isLoggedOut",
+            "is_logged_out"
+        ) || hasExplicitFalse(
+            obj,
+            "isLoggedIn",
+            "is_logged_in",
+            "loggedIn",
+            "logged_in",
+            "activeSession",
+            "active_session"
+        )
         val isOnline = when {
+            explicitlyLoggedOut -> false
             foregroundExplicitFalse -> false
             rawStatus in setOf(
                 "offline",
@@ -1176,6 +1192,17 @@ object BackendJsonParsers {
                 else -> ""
             }
             resolved.takeIf { it.isNotEmpty() }
+        }.getOrNull()
+    }
+
+    fun parseSendMessageServerId(rawJson: String?): String? {
+        val trimmed = rawJson?.trim().orEmpty()
+        if (trimmed.isEmpty() || !trimmed.startsWith("{")) return null
+        return runCatching {
+            val obj = org.json.JSONObject(trimmed)
+            val nested = obj.optJSONObject("message") ?: obj.optJSONObject("data")
+            nested?.let { firstNonBlankString(it, "id", "messageId", "message_id", "_id") }
+                ?: firstNonBlankString(obj, "messageId", "message_id", "id", "_id")
         }.getOrNull()
     }
 

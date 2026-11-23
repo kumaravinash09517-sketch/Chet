@@ -103,9 +103,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _authResolved.value = true
                 if (session != null) {
                     if (app.isUiInForeground) {
+                        app.chatRepository.markLocalSelfPresence(true)
                         app.signalingClient.setAppForeground(true)
                     }
                     app.startBackgroundSignalingService()
+                    launch { repository.fetchIceServers() }
                     refreshDirectory()
                 }
             }
@@ -229,6 +231,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openConversation(peerId: String, peerName: String) {
+        app.activeChatPeerId = peerId
         viewModelScope.launch {
             repository.startOrOpenConversation(peerId, peerName)
         }

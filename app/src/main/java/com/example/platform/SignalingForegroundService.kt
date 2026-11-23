@@ -75,14 +75,15 @@ class SignalingForegroundService : Service() {
         serviceScope.launch {
             var tick = 0
             while (isActive) {
-                delay(2_500L)
+                delay(3_000L)
                 val session = app.sessionManager.getCurrentSession() ?: continue
                 if (app.isUiInForeground) continue
 
                 tick++
-                if (tick % 2 == 0) {
-                    runCatching { app.chatRepository.pollBackgroundMessagesForNotifications(session.userId) }
+                if (tick % 3 == 1) {
+                    runCatching { app.chatRepository.syncUserDirectory() }
                 }
+                runCatching { app.chatRepository.pollBackgroundMessagesForNotifications(session.userId) }
             }
         }
     }

@@ -38,6 +38,7 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
+import java.util.concurrent.Executors
 
 class WebRTCClient(
     private val context: Context,
@@ -51,6 +52,7 @@ class WebRTCClient(
 ) {
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val audioDeviceModule: JavaAudioDeviceModule
     private val peerConnectionFactory: PeerConnectionFactory
     private var peerConnection: PeerConnection? = null
@@ -71,6 +73,8 @@ class WebRTCClient(
     private var captureWidth = 640
     private var captureHeight = 480
     private var captureFps = 24
+    @Volatile
+    private var isReleased = false
     private var shouldBeCapturing = false
     @Volatile
     private var isCapturing = false
@@ -183,7 +187,11 @@ class WebRTCClient(
             surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
             videoSource = peerConnectionFactory.createVideoSource(capturer.isScreencast)
             capturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
-            startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+            cameraExecutor.execute {
+                if (!isReleased && shouldBeCapturing) {
+                    startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+                }
+            }
             localVideoTrack = peerConnectionFactory.createVideoTrack("HELLO_SIR_VIDEO", videoSource).apply {
                 setEnabled(true)
             }
@@ -198,7 +206,14 @@ class WebRTCClient(
             shouldBeCapturing = true
             localVideoTrack?.setEnabled(true)
             if (!isCapturing) {
-                videoCapturer?.let { startCaptureSafely(it, captureWidth, captureHeight, captureFps) }
+                val capturer = videoCapturer
+                if (capturer != null) {
+                    cameraExecutor.execute {
+                        if (!isReleased && shouldBeCapturing && !isCapturing) {
+                            startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+                        }
+                    }
+                }
             }
         }
 
@@ -409,52 +424,72 @@ class WebRTCClient(
 
     private fun recoverFrozenOrStoppedCamera(escalateToCamera1: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!shouldBeCapturing) return
+        if (isReleased || !shouldBeCapturing) return
         if (!escalateToCamera1 && (now - lastFreezeRecoveryMs) < 1_800L) return
         lastFreezeRecoveryMs = now
         freezeRecoveryCount++
         mainHandler.postDelayed({
-            if (!shouldBeCapturing) return@postDelayed
-            if (!escalateToCamera1 && freezeRecoveryCount <= 1) {
-                val capturer = videoCapturer ?: return@postDelayed
-                runCatching { capturer.stopCapture() }
-                captureWidth = 640
-                captureHeight = 480
-                captureFps = 15
-                startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
-            } else {
-                // Escalated recovery: tear down stalled capturer and rebuild (prefer Camera1 if Camera2 stalled/froze)
-                runCatching { videoCapturer?.stopCapture() }
-                runCatching { videoCapturer?.dispose() }
-                videoCapturer = null
-                runCatching { surfaceTextureHelper?.dispose() }
-                surfaceTextureHelper = null
+            if (isReleased || !shouldBeCapturing) return@postDelayed
+            cameraExecutor.execute {
+                if (isReleased || !shouldBeCapturing) return@execute
+                if (!escalateToCamera1 && freezeRecoveryCount <= 1) {
+                    val capturer = videoCapturer ?: return@execute
+                    runCatching { capturer.stopCapture() }
+                    captureWidth = 640
+                    captureHeight = 480
+                    captureFps = 15
+                    startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+                } else {
+                    // Escalated recovery: tear down stalled capturer and rebuild off main thread (prefer Camera1 if Camera2 stalled/froze)
+                    runCatching { videoCapturer?.stopCapture() }
+                    runCatching { videoCapturer?.dispose() }
+                    videoCapturer = null
+                    runCatching { surfaceTextureHelper?.dispose() }
+                    surfaceTextureHelper = null
+                    if (isReleased || !shouldBeCapturing) return@execute
 
-                val selection = createCameraCapturer(preferCamera1 = true) ?: return@postDelayed
-                val freshCapturer = selection.capturer
-                videoCapturer = freshCapturer
-                captureWidth = 640
-                captureHeight = 480
-                captureFps = 15
-                isUsingFrontCamera = selection.isFront
-                surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
-                freshCapturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
-                startCaptureSafely(freshCapturer, captureWidth, captureHeight, captureFps)
-                localVideoTrack?.setEnabled(true)
-                runOnMain { onCameraFacingChanged(selection.isFront) }
+                    val selection = createCameraCapturer(preferCamera1 = true) ?: return@execute
+                    val freshCapturer = selection.capturer
+                    videoCapturer = freshCapturer
+                    captureWidth = 640
+                    captureHeight = 480
+                    captureFps = 15
+                    isUsingFrontCamera = selection.isFront
+                    surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+                    freshCapturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
+                    startCaptureSafely(freshCapturer, captureWidth, captureHeight, captureFps)
+                    runOnMain {
+                        if (isReleased) return@runOnMain
+                        localVideoTrack?.setEnabled(true)
+                        localRenderer?.let { sink ->
+                            runCatching { localVideoTrack?.removeSink(sink) }
+                            runCatching { localVideoTrack?.addSink(sink) }
+                        }
+                        onCameraFacingChanged(selection.isFront)
+                    }
+                }
             }
         }, 220L)
     }
 
     fun restartVideoCaptureIfActive() {
-        if (!shouldBeCapturing) return
+        if (isReleased || !shouldBeCapturing) return
+        // Do not tear down or interrupt a healthy streaming camera
+        if (isCapturing && hasReceivedFirstFrame) return
         val capturer = videoCapturer ?: run {
             ensureVideoCaptureStarted()
             return
         }
-        runCatching { capturer.stopCapture() }
-        startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
-        localVideoTrack?.setEnabled(true)
+        cameraExecutor.execute {
+            if (isReleased || !shouldBeCapturing) return@execute
+            runCatching { capturer.stopCapture() }
+            startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+            runOnMain {
+                if (!isReleased) {
+                    localVideoTrack?.setEnabled(true)
+                }
+            }
+        }
     }
 
     private fun createCameraCapturer(preferCamera1: Boolean = false): CapturerSelection? {
@@ -489,8 +524,8 @@ class WebRTCClient(
         val height = preferredFormat?.height ?: 480
         val maxFps = preferredFormat?.framerate?.max?.let { raw ->
             val normalized = if (raw > 1000) raw / 1000 else raw
-            normalized.coerceIn(15, 20)
-        } ?: 20
+            normalized.coerceIn(15, 24)
+        } ?: 24
 
         return CapturerSelection(
             capturer = capturer,
@@ -649,6 +684,7 @@ class WebRTCClient(
     }
 
     fun setVideoEnabled(enabled: Boolean) {
+        if (isReleased) return
         shouldBeCapturing = enabled
         if (enabled && localVideoTrack == null) {
             ensureVideoCaptureStarted()
@@ -656,7 +692,14 @@ class WebRTCClient(
         }
         localVideoTrack?.setEnabled(enabled)
         if (enabled) {
-            videoCapturer?.let { startCaptureSafely(it, captureWidth, captureHeight, captureFps) }
+            val capturer = videoCapturer
+            if (capturer != null && !isCapturing) {
+                cameraExecutor.execute {
+                    if (!isReleased && shouldBeCapturing && !isCapturing) {
+                        startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+                    }
+                }
+            }
             runOnMain {
                 localRenderer?.let { sink ->
                     runCatching { localVideoTrack?.removeSink(sink) }
@@ -667,7 +710,12 @@ class WebRTCClient(
             isCapturing = false
             hasReceivedFirstFrame = false
             mainHandler.removeCallbacks(firstFrameWatchdogRunnable)
-            runCatching { videoCapturer?.stopCapture() }
+            val capturer = videoCapturer
+            if (capturer != null) {
+                cameraExecutor.execute {
+                    runCatching { capturer.stopCapture() }
+                }
+            }
         }
     }
 
@@ -733,16 +781,24 @@ class WebRTCClient(
                             it.type == AudioDeviceInfo.TYPE_USB_HEADSET
                     } ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
                 }
-                if (target != null) {
+                val routed = if (target != null) {
                     audioManager.setCommunicationDevice(target)
+                } else {
+                    false
                 }
+                if (!routed) {
+                    @Suppress("DEPRECATION")
+                    audioManager.isSpeakerphoneOn = speakerOn
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = speakerOn
             }
-            @Suppress("DEPRECATION")
-            audioManager.isSpeakerphoneOn = speakerOn
         }
     }
 
     fun release() {
+        isReleased = true
         shouldBeCapturing = false
         isCapturing = false
         hasReceivedFirstFrame = false
@@ -757,23 +813,22 @@ class WebRTCClient(
         remoteVideoTrack = null
         remoteAudioTrack = null
 
-        runCatching { videoCapturer?.stopCapture() }
-        runCatching { videoCapturer?.dispose() }
+        val capturerSnapshot = videoCapturer
+        val helperSnapshot = surfaceTextureHelper
+        val vTrackSnapshot = localVideoTrack
+        val vSourceSnapshot = videoSource
+        val aTrackSnapshot = localAudioTrack
+        val aSourceSnapshot = audioSource
+        val pcSnapshot = peerConnection
+
         videoCapturer = null
-        runCatching { surfaceTextureHelper?.dispose() }
         surfaceTextureHelper = null
-        runCatching { localVideoTrack?.dispose() }
         localVideoTrack = null
-        runCatching { videoSource?.dispose() }
         videoSource = null
-        runCatching { localAudioTrack?.dispose() }
         localAudioTrack = null
-        runCatching { audioSource?.dispose() }
         audioSource = null
-        runCatching { peerConnection?.close() }
-        runCatching { peerConnection?.dispose() }
         peerConnection = null
-        runCatching { audioDeviceModule.release() }
+
         synchronized(queuedRemoteIce) { queuedRemoteIce.clear() }
         isRemoteDescriptionSet = false
         localAudioAdded = false
@@ -794,6 +849,23 @@ class WebRTCClient(
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = false
             audioManager.mode = AudioManager.MODE_NORMAL
+        }
+
+        // Run stopCapture/dispose off the main thread so a slow Camera2 HAL never freezes the UI on hangup
+        runCatching {
+            cameraExecutor.execute {
+                runCatching { capturerSnapshot?.stopCapture() }
+                runCatching { capturerSnapshot?.dispose() }
+                runCatching { pcSnapshot?.close() }
+                runCatching { pcSnapshot?.dispose() }
+                runCatching { vTrackSnapshot?.dispose() }
+                runCatching { vSourceSnapshot?.dispose() }
+                runCatching { helperSnapshot?.dispose() }
+                runCatching { aTrackSnapshot?.dispose() }
+                runCatching { aSourceSnapshot?.dispose() }
+                runCatching { audioDeviceModule.release() }
+            }
+            cameraExecutor.shutdown()
         }
     }
 
