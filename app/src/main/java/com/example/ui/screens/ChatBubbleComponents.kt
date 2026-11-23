@@ -2,10 +2,15 @@ package com.example.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
+import android.util.LruCache
+import android.widget.VideoView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -15,6 +20,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,9 +30,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.ContactPhone
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Map
@@ -35,6 +41,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,14 +61,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.example.data.local.MessageEntity
 import com.example.data.local.MessageType
 import com.example.data.remote.BackendJsonParsers
@@ -129,8 +142,6 @@ fun ChatMessageBubble(
                     onClick = {
                         if (message.type == MessageType.IMAGE && resolvedMediaSource != null) {
                             onImagePreview(resolvedMediaSource)
-                        } else if (message.type == MessageType.VIDEO && resolvedMediaSource != null) {
-                            onVideoPreview(resolvedMediaSource)
                         }
                     },
                     onLongClick = { onLongPressDelete(message) }
@@ -303,11 +314,25 @@ fun ChatMessageBubble(
                     )
                     if (isMine) {
                         Spacer(modifier = Modifier.width(4.dp))
-                        MessageStatusIcon(status = message.status, tintOverride = mutedColor)
+                        MessageStatusIcon(
+                            status = message.status,
+                            tintOverride = mutedColor,
+                            isOnDarkBubble = isMine
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+private object VideoThumbnailCache {
+    private val cache = LruCache<String, Bitmap>(24)
+
+    fun get(key: String): Bitmap? = cache.get(key)
+
+    fun put(key: String, bitmap: Bitmap) {
+        cache.put(key, bitmap)
     }
 }
 
@@ -321,51 +346,235 @@ private fun VideoPreviewCard(
     mutedColor: Color,
     onPlay: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    var thumbnail by remember(sourceUri) {
+        mutableStateOf(sourceUri?.let { VideoThumbnailCache.get(it) })
+    }
+    var isPlayingInline by remember(sourceUri) { mutableStateOf(false) }
+    var isPausedInline by remember(sourceUri) { mutableStateOf(false) }
+    var isBuffering by remember(sourceUri) { mutableStateOf(false) }
+    var inlinePlaybackError by remember(sourceUri) { mutableStateOf(false) }
+    var inlineVideoViewRef by remember(sourceUri) { mutableStateOf<VideoView?>(null) }
+
+    LaunchedEffect(sourceUri) {
+        val uri = sourceUri ?: return@LaunchedEffect
+        if (thumbnail != null) return@LaunchedEffect
+        val loaded = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                if (uri.startsWith("http://", ignoreCase = true) ||
+                    uri.startsWith("https://", ignoreCase = true)
+                ) {
+                    retriever.setDataSource(uri, emptyMap())
+                } else {
+                    retriever.setDataSource(context, Uri.parse(uri))
+                }
+                retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: retriever.getFrameAtTime()
+            } catch (_: Throwable) {
+                null
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+        if (loaded != null) {
+            VideoThumbnailCache.put(uri, loaded)
+            thumbnail = loaded
+        }
+    }
+
+    DisposableEffect(sourceUri) {
+        onDispose {
+            runCatching { inlineVideoViewRef?.stopPlayback() }
+            inlineVideoViewRef = null
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
             shape = RoundedCornerShape(12.dp),
-            color = Color.Black.copy(alpha = 0.28f),
+            color = Color.Black.copy(alpha = 0.85f),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(140.dp)
+                .height(180.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(enabled = sourceUri != null) {
-                    if (sourceUri != null) onPlay(sourceUri)
+                    if (sourceUri == null) return@clickable
+                    if (!isPlayingInline || inlinePlaybackError) {
+                        inlinePlaybackError = false
+                        isPausedInline = false
+                        isBuffering = true
+                        isPlayingInline = true
+                    } else {
+                        val vv = inlineVideoViewRef
+                        if (vv != null) {
+                            if (isPausedInline) {
+                                runCatching { vv.start() }
+                                isPausedInline = false
+                            } else {
+                                runCatching { vv.pause() }
+                                isPausedInline = true
+                            }
+                        }
+                    }
                 }
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                    modifier = Modifier.padding(12.dp)
-                ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (isPlayingInline && sourceUri != null && !inlinePlaybackError) {
+                    AndroidView(
+                        factory = { ctx ->
+                            VideoView(ctx).apply {
+                                setVideoURI(Uri.parse(sourceUri))
+                                setOnPreparedListener { mp ->
+                                    isBuffering = false
+                                    mp.isLooping = false
+                                    if (!isPausedInline) {
+                                        start()
+                                    }
+                                }
+                                setOnCompletionListener {
+                                    isPlayingInline = false
+                                    isPausedInline = false
+                                    isBuffering = false
+                                }
+                                setOnErrorListener { _, _, _ ->
+                                    isBuffering = false
+                                    isPlayingInline = false
+                                    inlinePlaybackError = true
+                                    true
+                                }
+                            }.also { inlineVideoViewRef = it }
+                        },
+                        update = { view ->
+                            inlineVideoViewRef = view
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    val bmp = thumbnail
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.34f))
+                        )
+                    }
+                }
+
+                if (isBuffering && isPlayingInline) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(34.dp)
+                    )
+                } else if (!isPlayingInline || isPausedInline || inlinePlaybackError) {
                     Surface(
                         shape = CircleShape,
-                        color = Color.White.copy(alpha = 0.22f),
+                        color = Color.Black.copy(alpha = 0.56f),
                         modifier = Modifier.size(52.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                imageVector = if (sourceUri != null) Icons.Rounded.PlayArrow else Icons.Rounded.Videocam,
-                                contentDescription = "Play video",
-                                tint = contentColor,
+                                imageVector = when {
+                                    sourceUri == null -> Icons.Rounded.Videocam
+                                    inlinePlaybackError -> Icons.Rounded.Refresh
+                                    else -> Icons.Rounded.PlayArrow
+                                },
+                                contentDescription = if (isPausedInline) "Resume video" else "Play video",
+                                tint = Color.White,
                                 modifier = Modifier.size(30.dp)
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = contentColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (sourceUri != null) "Tap to play • $subtitle" else "Uploading video…",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = mutedColor
-                    )
+                }
+
+                if (isPlayingInline && !isPausedInline && !isBuffering) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.48f),
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                val vv = inlineVideoViewRef
+                                if (vv != null) {
+                                    runCatching { vv.pause() }
+                                    isPausedInline = true
+                                }
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("inline_video_pause_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Pause,
+                                contentDescription = "Pause video",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = when {
+                                sourceUri == null -> "Uploading video…"
+                                inlinePlaybackError -> "Tap to retry • Open fullscreen"
+                                else -> "$subtitle • Tap to play"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+
+                if (sourceUri != null) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.52f),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                runCatching { inlineVideoViewRef?.pause() }
+                                isPausedInline = true
+                                onPlay(sourceUri)
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("video_fullscreen_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Fullscreen,
+                                contentDescription = "Fullscreen video",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

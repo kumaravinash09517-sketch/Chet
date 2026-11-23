@@ -12,7 +12,9 @@ import com.example.core.security.ServerStatus
 import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.UserEntity
+import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
+import com.example.platform.ShayariManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,9 +86,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isSearchingUsers = MutableStateFlow(false)
     val isSearchingUsers: StateFlow<Boolean> = _isSearchingUsers.asStateFlow()
 
+    private val _currentShayari = MutableStateFlow(ShayariManager.nextShayariForAppOpen(app))
+    val currentShayari: StateFlow<DailyShayari> = _currentShayari.asStateFlow()
+
     private var searchJob: Job? = null
 
     init {
+        ShayariManager.scheduleDailyMorningNotification(app)
         viewModelScope.launch {
             val deviceId = repository.getDeviceLockId()
             _loginFlowState.update { it.copy(deviceId = deviceId) }
@@ -109,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun rotateDailyShayari() {
+        _currentShayari.value = ShayariManager.getShayariAfterIndex(_currentShayari.value.id)
     }
 
     fun updateSearchQuery(query: String) {

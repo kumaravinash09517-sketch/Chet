@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -63,6 +64,7 @@ import androidx.navigation.toRoute
 import com.example.core.security.GlobalSecurityEventBus
 import com.example.core.security.IncomingMessageAlert
 import com.example.platform.NotificationHelper
+import com.example.platform.ShayariManager
 import com.example.rtc.CallState
 import com.example.ui.navigation.CallRoute
 import com.example.ui.navigation.ChatRoute
@@ -103,6 +105,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ShayariManager.scheduleDailyMorningNotification(this)
         requestNotificationPermissionIfNeeded()
         handleDeepLinkIntent(intent)
 
@@ -129,6 +132,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val app = application as HelloSirApplication
         app.isUiInForeground = true
+        callViewModel.onAppResumed()
         lifecycleScope.launch {
             app.chatRepository.pollIncomingCallsOnce(includeActiveCalls = true)
         }
@@ -141,21 +145,41 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleDeepLinkIntent(intent)
+    }
+
+    private fun enableCallLockscreenDisplay(dismissKeyguard: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            if (dismissKeyguard) {
+                val km = getSystemService(KeyguardManager::class.java)
+                if (km != null && km.isKeyguardLocked) {
+                    runCatching { km.requestDismissKeyguard(this, null) }
+                }
+            }
+        }
     }
 
     private fun handleDeepLinkIntent(intent: Intent?) {
         intent ?: return
         if (intent.getBooleanExtra(NotificationHelper.EXTRA_OPEN_CALL, false)) {
+            val autoAccept = intent.getBooleanExtra(NotificationHelper.EXTRA_AUTO_ACCEPT, false)
+            if (autoAccept) {
+                NotificationHelper.stopRingtoneAndVibrate(this)
+            }
+            enableCallLockscreenDisplay(dismissKeyguard = autoAccept)
             val callId = intent.getStringExtra(NotificationHelper.EXTRA_CALL_ID) ?: return
             val callerId = intent.getStringExtra(NotificationHelper.EXTRA_CALLER_ID) ?: return
             val callerName = intent.getStringExtra(NotificationHelper.EXTRA_CALLER_NAME) ?: callerId
             val isVideo = intent.getBooleanExtra(NotificationHelper.EXTRA_IS_VIDEO, false)
             val sdp = intent.getStringExtra(NotificationHelper.EXTRA_OFFER_SDP) ?: return
-            val autoAccept = intent.getBooleanExtra(NotificationHelper.EXTRA_AUTO_ACCEPT, false)
+            if (autoAccept) {
+                (application as HelloSirApplication).chatRepository.markCallAnswered(callId)
+            }
             callViewModel.injectIncomingCallFromIntent(callId, callerId, callerName, isVideo, sdp)
             if (autoAccept) {
-                NotificationHelper.stopRingtoneAndVibrate(this)
                 callViewModel.acceptIncomingCall()
             }
             return
@@ -206,6 +230,7 @@ private fun HelloSirRoot(
     val wsConnected by mainViewModel.wsConnected.collectAsStateWithLifecycle()
     val loginFlowState by mainViewModel.loginFlowState.collectAsStateWithLifecycle()
     val isBlocked by mainViewModel.isBlockedByAdmin.collectAsStateWithLifecycle()
+    val currentShayari by mainViewModel.currentShayari.collectAsStateWithLifecycle()
     val callState by callViewModel.callState.collectAsStateWithLifecycle()
     val pendingChatDeepLink by pendingChatDeepLinkFlow.collectAsStateWithLifecycle()
 
@@ -328,6 +353,8 @@ private fun HelloSirRoot(
                             isSearchingUsers = isSearchingUsers,
                             serverStatus = serverStatus,
                             wsConnected = wsConnected,
+                            currentShayari = currentShayari,
+                            onNextShayari = { mainViewModel.rotateDailyShayari() },
                             hasContactPermission = { mainViewModel.hasContactPermission() },
                             onSearchQueryChange = { mainViewModel.updateSearchQuery(it) },
                             onRefreshDirectory = { mainViewModel.refreshDirectory() },
@@ -456,7 +483,7 @@ private fun HelloSirRoot(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = banner.senderName,
+                                text = NotificationHelper.formatSenderTitle(banner.senderName, banner.peerId),
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,

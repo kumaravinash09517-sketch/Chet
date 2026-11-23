@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import com.example.core.security.AuthCredentials
+import com.example.core.security.AuthGateway
 import com.example.core.security.GlobalSecurityEventBus
 import com.example.core.security.IncomingMessageAlert
 import com.example.core.security.ServerStatus
@@ -243,6 +245,7 @@ object CallSignalDeduplicator {
     private const val MAX_KEYS = 400
     private val seenKeys = LinkedHashSet<String>()
     private val dismissedCallIds = LinkedHashSet<String>()
+    private val answeredCallIds = LinkedHashSet<String>()
 
     fun buildKey(
         type: String,
@@ -281,15 +284,33 @@ object CallSignalDeduplicator {
     }
 
     @Synchronized
+    fun markAnswered(callId: String) {
+        val clean = callId.trim()
+        if (clean.isEmpty()) return
+        answeredCallIds.add(clean)
+        while (answeredCallIds.size > 100) {
+            val first = answeredCallIds.firstOrNull() ?: break
+            answeredCallIds.remove(first)
+        }
+    }
+
+    @Synchronized
     fun isDismissed(callId: String): Boolean {
         val clean = callId.trim()
         return clean.isNotEmpty() && dismissedCallIds.contains(clean)
     }
 
     @Synchronized
+    fun isHandled(callId: String): Boolean {
+        val clean = callId.trim()
+        return clean.isNotEmpty() && (dismissedCallIds.contains(clean) || answeredCallIds.contains(clean))
+    }
+
+    @Synchronized
     fun clear() {
         seenKeys.clear()
         dismissedCallIds.clear()
+        answeredCallIds.clear()
     }
 }
 
@@ -299,7 +320,7 @@ class ChatRepository(
     private val apiService: ApiService,
     private val signalingClient: SignalingClient,
     private val sessionManager: SessionManager
-) {
+) : AuthGateway {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val userDao = database.userDao()
     private val conversationDao = database.conversationDao()
@@ -334,7 +355,13 @@ class ChatRepository(
         CallSignalDeduplicator.markDismissed(callId)
     }
 
+    fun markCallAnswered(callId: String) {
+        CallSignalDeduplicator.markAnswered(callId)
+    }
+
     fun isCallDismissed(callId: String): Boolean = CallSignalDeduplicator.isDismissed(callId)
+
+    fun isCallHandled(callId: String): Boolean = CallSignalDeduplicator.isHandled(callId)
 
     private fun observeSessionForCallPolling() {
         scope.launch {
@@ -400,7 +427,7 @@ class ChatRepository(
 
             if (signal.senderId.equals(myId, ignoreCase = true)) continue
             if (signal.receiverId.isNotBlank() && !signal.receiverId.equals(myId, ignoreCase = true)) continue
-            if (signal.type == "offer" && CallSignalDeduplicator.isDismissed(signal.callId)) continue
+            if (signal.type == "offer" && CallSignalDeduplicator.isHandled(signal.callId)) continue
 
             val payloadHint = when (signal.type) {
                 "offer", "answer", "connected" -> signal.sdp
@@ -834,6 +861,24 @@ class ChatRepository(
                 Result.failure(e)
             }
         }
+
+    override suspend fun signIn(credentials: AuthCredentials): Result<UserSession> {
+        return when (credentials) {
+            is AuthCredentials.DirectUserId -> loginDirect(
+                userId = credentials.userId,
+                displayName = credentials.username,
+                avatarUrl = credentials.avatarUrl,
+                deviceId = credentials.deviceId
+            )
+            is AuthCredentials.GoogleIdToken -> Result.failure(
+                UnsupportedOperationException("Google Sign-In provider is not yet enabled on this server.")
+            )
+        }
+    }
+
+    override suspend fun signOut() {
+        logout()
+    }
 
     suspend fun loginDirect(
         userId: String,

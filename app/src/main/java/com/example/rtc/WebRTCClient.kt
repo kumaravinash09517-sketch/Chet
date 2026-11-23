@@ -67,6 +67,11 @@ class WebRTCClient(
     private var remoteRenderer: SurfaceViewRenderer? = null
     private var localAudioAdded = false
     private var localVideoAdded = false
+    private var captureWidth = 640
+    private var captureHeight = 480
+    private var captureFps = 24
+    private var shouldBeCapturing = false
+    private var lastFreezeRecoveryMs = 0L
 
     @Volatile
     private var isRemoteDescriptionSet = false
@@ -89,7 +94,8 @@ class WebRTCClient(
         audioDeviceModule.setMicrophoneMute(false)
         audioDeviceModule.setSpeakerMute(false)
 
-        val encoderFactory = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true)
+        // Constrained baseline (enableH264HighProfile = false) prevents hardware encoder stalls/freezes on mobile SoCs
+        val encoderFactory = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, false)
         val decoderFactory = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
 
         peerConnectionFactory = PeerConnectionFactory.builder()
@@ -104,19 +110,17 @@ class WebRTCClient(
             if (localRenderer !== local) {
                 localRenderer?.let { old -> runCatching { localVideoTrack?.removeSink(old) } }
                 localRenderer = local
-            }
-            if (local != null) {
-                runCatching { localVideoTrack?.removeSink(local) }
-                runCatching { localVideoTrack?.addSink(local) }
+                if (local != null) {
+                    runCatching { localVideoTrack?.addSink(local) }
+                }
             }
 
             if (remoteRenderer !== remote) {
                 remoteRenderer?.let { old -> runCatching { remoteVideoTrack?.removeSink(old) } }
                 remoteRenderer = remote
-            }
-            if (remote != null) {
-                runCatching { remoteVideoTrack?.removeSink(remote) }
-                runCatching { remoteVideoTrack?.addSink(remote) }
+                if (remote != null) {
+                    runCatching { remoteVideoTrack?.addSink(remote) }
+                }
             }
         }
     }
@@ -150,23 +154,28 @@ class WebRTCClient(
             val capturerSelection = createCameraCapturer() ?: return false
             val capturer = capturerSelection.capturer
             videoCapturer = capturer
+            captureWidth = capturerSelection.width
+            captureHeight = capturerSelection.height
+            captureFps = capturerSelection.fps
+            shouldBeCapturing = true
+
             surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
             videoSource = peerConnectionFactory.createVideoSource(capturer.isScreencast)
             capturer.initialize(surfaceTextureHelper, appContext, videoSource?.capturerObserver)
-            startCaptureSafely(capturer, capturerSelection.width, capturerSelection.height, capturerSelection.fps)
+            startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
             localVideoTrack = peerConnectionFactory.createVideoTrack("HELLO_SIR_VIDEO", videoSource).apply {
                 setEnabled(true)
             }
             onCameraFacingChanged(capturerSelection.isFront)
-        } else {
-            localVideoTrack?.setEnabled(true)
-        }
-
-        runOnMain {
-            localRenderer?.let { sink ->
-                runCatching { localVideoTrack?.removeSink(sink) }
-                runCatching { localVideoTrack?.addSink(sink) }
+            runOnMain {
+                localRenderer?.let { sink ->
+                    runCatching { localVideoTrack?.removeSink(sink) }
+                    runCatching { localVideoTrack?.addSink(sink) }
+                }
             }
+        } else {
+            shouldBeCapturing = true
+            localVideoTrack?.setEnabled(true)
         }
 
         val pc = peerConnection
@@ -322,6 +331,50 @@ class WebRTCClient(
         val fps: Int
     )
 
+    private val cameraEventsHandler = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(errorDescription: String?) {
+            recoverFrozenOrStoppedCamera()
+        }
+
+        override fun onCameraDisconnected() {
+            recoverFrozenOrStoppedCamera()
+        }
+
+        override fun onCameraFreezed(errorDescription: String?) {
+            recoverFrozenOrStoppedCamera()
+        }
+
+        override fun onCameraOpening(cameraName: String?) = Unit
+        override fun onFirstFrameAvailable() = Unit
+        override fun onCameraClosed() = Unit
+    }
+
+    private fun recoverFrozenOrStoppedCamera() {
+        val now = System.currentTimeMillis()
+        if (!shouldBeCapturing || (now - lastFreezeRecoveryMs) < 1_800L) return
+        lastFreezeRecoveryMs = now
+        mainHandler.postDelayed({
+            if (!shouldBeCapturing) return@postDelayed
+            val capturer = videoCapturer ?: return@postDelayed
+            runCatching { capturer.stopCapture() }
+            captureWidth = 640
+            captureHeight = 480
+            captureFps = 20
+            startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+        }, 220L)
+    }
+
+    fun restartVideoCaptureIfActive() {
+        if (!shouldBeCapturing) return
+        val capturer = videoCapturer ?: run {
+            ensureVideoCaptureStarted()
+            return
+        }
+        runCatching { capturer.stopCapture() }
+        startCaptureSafely(capturer, captureWidth, captureHeight, captureFps)
+        localVideoTrack?.setEnabled(true)
+    }
+
     private fun createCameraCapturer(): CapturerSelection? {
         if (Camera2Enumerator.isSupported(appContext)) {
             pickCapturerFromEnumerator(Camera2Enumerator(appContext))?.let { return it }
@@ -335,20 +388,22 @@ class WebRTCClient(
         val frontName = deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
         val targetName = frontName ?: deviceNames.firstOrNull() ?: return null
         val isFront = frontName != null
-        val capturer = runCatching { enumerator.createCapturer(targetName, null) }.getOrNull() ?: return null
+        val capturer = runCatching {
+            enumerator.createCapturer(targetName, cameraEventsHandler)
+        }.getOrNull() ?: return null
 
         val formats = runCatching { enumerator.getSupportedFormats(targetName) }.getOrNull().orEmpty()
         val preferredFormat = formats
-            .filter { it.width in 480..1280 && it.height in 360..1280 }
-            .minByOrNull { kotlin.math.abs((it.width * it.height) - (1280 * 720)) }
+            .filter { it.width in 480..960 && it.height in 360..720 }
+            .minByOrNull { kotlin.math.abs((it.width * it.height) - (640 * 480)) }
             ?: formats.firstOrNull()
 
-        val width = preferredFormat?.width ?: 1280
-        val height = preferredFormat?.height ?: 720
+        val width = preferredFormat?.width ?: 640
+        val height = preferredFormat?.height ?: 480
         val maxFps = preferredFormat?.framerate?.max?.let { raw ->
             val normalized = if (raw > 1000) raw / 1000 else raw
-            normalized.coerceIn(15, 30)
-        } ?: 30
+            normalized.coerceIn(15, 24)
+        } ?: 24
 
         return CapturerSelection(
             capturer = capturer,
@@ -493,17 +548,22 @@ class WebRTCClient(
     }
 
     fun setVideoEnabled(enabled: Boolean) {
+        shouldBeCapturing = enabled
         if (enabled && localVideoTrack == null) {
             ensureVideoCaptureStarted()
+            return
         }
         localVideoTrack?.setEnabled(enabled)
         if (enabled) {
+            runCatching { videoCapturer?.startCapture(captureWidth, captureHeight, captureFps) }
             runOnMain {
                 localRenderer?.let { sink ->
                     runCatching { localVideoTrack?.removeSink(sink) }
                     runCatching { localVideoTrack?.addSink(sink) }
                 }
             }
+        } else {
+            runCatching { videoCapturer?.stopCapture() }
         }
     }
 
@@ -575,6 +635,7 @@ class WebRTCClient(
     }
 
     fun release() {
+        shouldBeCapturing = false
         runOnMain {
             localRenderer?.let { sink -> runCatching { localVideoTrack?.removeSink(sink) } }
             remoteRenderer?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }

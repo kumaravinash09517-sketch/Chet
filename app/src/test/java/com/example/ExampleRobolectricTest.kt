@@ -610,4 +610,70 @@ class ExampleRobolectricTest {
         assertEquals("u_sandeep", answerReq.senderId)
         assertEquals("u_avinash", answerReq.receiverId)
     }
+
+    @Test
+    fun `notificationHelper formats sender title with Name and User ID`() {
+        assertEquals(
+            "Sandeep (u_919250903007)",
+            com.example.platform.NotificationHelper.formatSenderTitle("Sandeep", "u_919250903007")
+        )
+        assertEquals(
+            "u_919250903007",
+            com.example.platform.NotificationHelper.formatSenderTitle("  ", "u_919250903007")
+        )
+        assertEquals(
+            "avinash",
+            com.example.platform.NotificationHelper.formatSenderTitle("avinash", "Avinash")
+        )
+    }
+
+    @Test
+    fun `shayariManager rotates shayari on every open and deduplicates morning notifications`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(com.example.platform.ShayariManager.shayariCollection.size >= 20)
+
+        val first = com.example.platform.ShayariManager.nextShayariForAppOpen(context, nowMillis = 1_763_700_000_000L)
+        val second = com.example.platform.ShayariManager.nextShayariForAppOpen(context, nowMillis = 1_763_700_060_000L)
+        val third = com.example.platform.ShayariManager.getShayariAfterIndex(second.id)
+        assertTrue(first.id != second.id)
+        assertTrue(second.id != third.id)
+        assertTrue(first.lines.isNotBlank())
+
+        val dayOne = 1_763_700_000_000L
+        val nextDay = dayOne + 24L * 60L * 60L * 1000L
+        assertTrue(com.example.platform.ShayariManager.shouldSendMorningNotificationToday(context, dayOne))
+        com.example.platform.ShayariManager.markMorningNotificationSent(context, dayOne)
+        org.junit.Assert.assertFalse(
+            com.example.platform.ShayariManager.shouldSendMorningNotificationToday(context, dayOne + 3_600_000L)
+        )
+        assertTrue(com.example.platform.ShayariManager.shouldSendMorningNotificationToday(context, nextDay))
+    }
+
+    @Test
+    fun `callSignalDeduplicator tracks answered calls so poll cannot re-ring them`() {
+        com.example.data.repository.CallSignalDeduplicator.clear()
+        org.junit.Assert.assertFalse(com.example.data.repository.CallSignalDeduplicator.isHandled("call_ans_1"))
+        com.example.data.repository.CallSignalDeduplicator.markAnswered("call_ans_1")
+        assertTrue(com.example.data.repository.CallSignalDeduplicator.isHandled("call_ans_1"))
+        com.example.data.repository.CallSignalDeduplicator.clear()
+    }
+
+    @Test
+    fun `authCredentials sealed hierarchy holds DirectUserId and GoogleIdToken payloads`() {
+        val direct: com.example.core.security.AuthCredentials =
+            com.example.core.security.AuthCredentials.DirectUserId(
+                username = "Avinash",
+                userId = "u_919455877902",
+                avatarUrl = null,
+                deviceId = "dev_1"
+            )
+        val google: com.example.core.security.AuthCredentials =
+            com.example.core.security.AuthCredentials.GoogleIdToken(
+                idToken = "id_tok_abc",
+                email = "avinash@example.com",
+                displayName = "Avinash"
+            )
+        assertTrue(direct is com.example.core.security.AuthCredentials.DirectUserId)
+        assertTrue(google is com.example.core.security.AuthCredentials.GoogleIdToken)
+    }
 }

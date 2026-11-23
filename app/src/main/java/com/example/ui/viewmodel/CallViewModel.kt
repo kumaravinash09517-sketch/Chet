@@ -107,7 +107,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
                         val effectiveCallId = event.callId.ifBlank { UUID.randomUUID().toString() }
-                        val alreadyHandled = repository.isCallDismissed(effectiveCallId)
+                        val alreadyHandled = repository.isCallHandled(effectiveCallId)
                         if (!alreadyHandled && (_callState.value is CallState.Idle || _callState.value is CallState.Ended)) {
                             val resolvedCallerName = if (event.callerName.isBlank() || event.callerName == event.callerId) {
                                 app.database.userDao().getUser(event.callerId)?.displayName ?: event.callerId
@@ -300,14 +300,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun acceptIncomingCall() {
-        val incoming = _callState.value as? CallState.IncomingRinging ?: return
         NotificationHelper.stopRingtoneAndVibrate(app)
+        val incoming = _callState.value as? CallState.IncomingRinging ?: return
 
         viewModelScope.launch {
             if (!signalingClient.isConnected.value) {
                 signalingClient.connect()
             }
             activeCallId = incoming.callId.ifBlank { activeCallId.ifBlank { UUID.randomUUID().toString() } }
+            repository.markCallAnswered(activeCallId)
             activePeerId = incoming.callerId
             activePeerName = incoming.callerName
             activeIsVideo = incoming.isVideo
@@ -360,6 +361,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun onAppResumed() {
+        if (activeIsVideo && _isVideoEnabled.value && _callState.value !is CallState.Idle && _callState.value !is CallState.Ended) {
+            webRTCClient?.restartVideoCaptureIfActive()
+            syncRenderersToClient()
+        }
+    }
+
     fun injectIncomingCallFromIntent(
         callId: String,
         callerId: String,
@@ -367,11 +375,21 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         isVideo: Boolean,
         offerSdp: String
     ) {
-        activeCallId = callId.ifBlank { UUID.randomUUID().toString() }
+        val cleanCallId = callId.ifBlank { UUID.randomUUID().toString() }
+        val currentState = _callState.value
+        if (activeCallId == cleanCallId &&
+            (currentState is CallState.Connecting || currentState is CallState.Connected)
+        ) {
+            return
+        }
+        activeCallId = cleanCallId
         activePeerId = callerId
         activePeerName = callerName
         activeIsVideo = isVideo
+        hasAppliedRemoteAnswer = false
+        hasSentConnectedSignal = false
         _isVideoEnabled.value = isVideo
+        _isSpeakerOn.value = isVideo
         _hasRemoteVideo.value = false
         repository.setFastCallPolling(true)
         _callState.value = CallState.IncomingRinging(

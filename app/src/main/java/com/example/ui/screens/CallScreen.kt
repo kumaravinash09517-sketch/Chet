@@ -202,12 +202,6 @@ fun CallScreen(
         }
     }
 
-    LaunchedEffect(showLocalPreview, showRemoteVideo) {
-        if (isVideoCall && isActiveCall) {
-            onAttachRenderers(localView, remoteView)
-        }
-    }
-
     DisposableEffect(remoteView, localView) {
         onDispose {
             runCatching { localView.release() }
@@ -230,11 +224,14 @@ fun CallScreen(
                 factory = {
                     remoteView.apply {
                         setZOrderMediaOverlay(false)
+                        setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                     }
                 },
                 update = { view ->
-                    view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-                    view.visibility = if (showRemoteVideo) View.VISIBLE else View.INVISIBLE
+                    val targetVis = if (showRemoteVideo) View.VISIBLE else View.INVISIBLE
+                    if (view.visibility != targetVis) {
+                        view.visibility = targetVis
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -259,27 +256,34 @@ fun CallScreen(
             }
 
             Box(modifier = localContainerModifier) {
+                var appliedMirror by remember { mutableStateOf<Boolean?>(null) }
+                var appliedPipMode by remember { mutableStateOf<Boolean?>(null) }
                 AndroidView(
                     factory = {
                         localView.apply {
                             setZOrderMediaOverlay(true)
+                            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                         }
                     },
                     update = { view ->
-                        view.setZOrderMediaOverlay(true)
-                        view.setMirror(isFrontCamera)
-                        view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-                        if (isPipMode) {
-                            view.clipToOutline = true
-                            view.outlineProvider = object : ViewOutlineProvider() {
-                                override fun getOutline(v: View, outline: Outline) {
-                                    val radius = 16f * v.resources.displayMetrics.density
-                                    outline.setRoundRect(0, 0, v.width, v.height, radius)
+                        if (appliedMirror != isFrontCamera) {
+                            appliedMirror = isFrontCamera
+                            view.setMirror(isFrontCamera)
+                        }
+                        if (appliedPipMode != isPipMode) {
+                            appliedPipMode = isPipMode
+                            if (isPipMode) {
+                                view.clipToOutline = true
+                                view.outlineProvider = object : ViewOutlineProvider() {
+                                    override fun getOutline(v: View, outline: Outline) {
+                                        val radius = 16f * v.resources.displayMetrics.density
+                                        outline.setRoundRect(0, 0, v.width, v.height, radius)
+                                    }
                                 }
+                            } else {
+                                view.clipToOutline = false
+                                view.outlineProvider = ViewOutlineProvider.BACKGROUND
                             }
-                        } else {
-                            view.clipToOutline = false
-                            view.outlineProvider = ViewOutlineProvider.BACKGROUND
                         }
                     },
                     modifier = Modifier.fillMaxSize()

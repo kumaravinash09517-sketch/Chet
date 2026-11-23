@@ -8,7 +8,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -24,13 +23,15 @@ import com.example.MainActivity
 import com.example.R
 
 object NotificationHelper {
-    const val CHANNEL_CALLS = "hello_sir_calls"
+    const val CHANNEL_CALLS = "hello_sir_calls_v2"
     const val CHANNEL_MESSAGES = "hello_sir_messages"
     const val CHANNEL_SYNC = "hello_sir_sync"
+    const val CHANNEL_SHAYARI = "hello_sir_shayari"
 
     const val NOTIFICATION_SYNC_ID = 1001
     const val NOTIFICATION_CALL_ID = 2001
     const val NOTIFICATION_ACTIVE_CALL_ID = 2002
+    const val NOTIFICATION_SHAYARI_ID = 3001
 
     const val EXTRA_CALL_ID = "extra_call_id"
     const val EXTRA_CALLER_ID = "extra_caller_id"
@@ -44,27 +45,38 @@ object NotificationHelper {
     const val EXTRA_OPEN_CHAT = "extra_open_chat"
     const val KEY_TEXT_REPLY = "key_text_reply"
 
+    @Volatile
     private var activeRingtone: Ringtone? = null
+
+    @Volatile
     private var outgoingToneGenerator: ToneGenerator? = null
+
+    @Volatile
+    private var activeIncomingCallId: String? = null
+
+    fun formatSenderTitle(displayName: String?, userId: String): String {
+        val cleanId = userId.trim()
+        val cleanName = displayName?.trim().orEmpty()
+        return when {
+            cleanName.isBlank() -> cleanId
+            cleanId.isBlank() || cleanName.equals(cleanId, ignoreCase = true) -> cleanName
+            else -> "$cleanName ($cleanId)"
+        }
+    }
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
 
-            val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            val callAudio = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
-
+            // Keep channel sound silent so activeRingtone stops instantaneously when user answers/declines
             val callChannel = NotificationChannel(
                 CHANNEL_CALLS,
                 context.getString(R.string.channel_calls_name),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Full-screen incoming audio & video call alerts"
-                setSound(ringtoneUri, callAudio)
-                enableVibration(true)
+                setSound(null, null)
+                enableVibration(false)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
 
@@ -75,6 +87,14 @@ object NotificationHelper {
             ).apply {
                 description = "Real-time incoming messages with inline reply"
                 enableVibration(true)
+            }
+
+            val shayariChannel = NotificationChannel(
+                CHANNEL_SHAYARI,
+                context.getString(R.string.channel_shayari_name),
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Daily morning Hindi Shayari inspiration"
             }
 
             val syncChannel = NotificationChannel(
@@ -88,6 +108,7 @@ object NotificationHelper {
 
             manager.createNotificationChannel(callChannel)
             manager.createNotificationChannel(messageChannel)
+            manager.createNotificationChannel(shayariChannel)
             manager.createNotificationChannel(syncChannel)
         }
     }
@@ -122,6 +143,7 @@ object NotificationHelper {
             .setContentTitle("$typeLabel with $peerName")
             .setContentText("Tap to return to call")
             .setOngoing(true)
+            .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentIntent(openIntent)
             .build()
@@ -136,10 +158,16 @@ object NotificationHelper {
         offerSdp: String
     ) {
         if (!canPostNotifications(context)) return
+        activeIncomingCallId = callId
         startRingtoneAndVibrate(context)
 
+        val baseReqCode = ((callId.hashCode() and 0xFFFF) shl 2) + 4000
+        val senderTitle = formatSenderTitle(callerName, callerId)
+
         val fullScreenIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_OPEN_CALL, true)
             putExtra(EXTRA_CALL_ID, callId)
             putExtra(EXTRA_CALLER_ID, callerId)
@@ -150,13 +178,15 @@ object NotificationHelper {
 
         val fullScreenPending = PendingIntent.getActivity(
             context,
-            201,
+            baseReqCode + 1,
             fullScreenIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
         val answerIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_OPEN_CALL, true)
             putExtra(EXTRA_AUTO_ACCEPT, true)
             putExtra(EXTRA_CALL_ID, callId)
@@ -167,7 +197,7 @@ object NotificationHelper {
         }
         val answerPending = PendingIntent.getActivity(
             context,
-            203,
+            baseReqCode + 2,
             answerIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -179,20 +209,22 @@ object NotificationHelper {
         }
         val declinePending = PendingIntent.getBroadcast(
             context,
-            202,
+            baseReqCode + 3,
             declineIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val callTypeLabel = if (isVideo) "Incoming Video Call" else "Incoming Audio Call"
+        val callTypeLabel = if (isVideo) "Incoming Video Call" else "Incoming Voice Call"
 
         val notification = NotificationCompat.Builder(context, CHANNEL_CALLS)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
-            .setContentTitle(callerName)
+            .setContentTitle(senderTitle)
             .setContentText(callTypeLabel)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(fullScreenPending, true)
+            .setContentIntent(fullScreenPending)
             .setAutoCancel(true)
             .setOngoing(true)
             .addAction(android.R.drawable.ic_menu_call, "Answer", answerPending)
@@ -211,6 +243,7 @@ object NotificationHelper {
     ) {
         if (!canPostNotifications(context)) return
 
+        val senderTitle = formatSenderTitle(senderName, senderId)
         val openChatIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_OPEN_CHAT, true)
@@ -225,7 +258,7 @@ object NotificationHelper {
         )
 
         val remoteInput = RemoteInput.Builder(KEY_TEXT_REPLY)
-            .setLabel("Reply to $senderName")
+            .setLabel("Reply to $senderTitle")
             .build()
 
         val replyIntent = Intent(context, CallNotificationReceiver::class.java).apply {
@@ -248,8 +281,9 @@ object NotificationHelper {
 
         val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle(senderName)
+            .setContentTitle(senderTitle)
             .setContentText(preview)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setAutoCancel(true)
@@ -261,9 +295,36 @@ object NotificationHelper {
         manager?.notify(senderId.hashCode(), notification)
     }
 
+    fun showDailyShayariNotification(context: Context, shayari: DailyShayari) {
+        if (!canPostNotifications(context)) return
+        val openIntent = PendingIntent.getActivity(
+            context,
+            4012,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val title = "सुप्रभात • ${shayari.mood}"
+        val notification = NotificationCompat.Builder(context, CHANNEL_SHAYARI)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle(title)
+            .setContentText(shayari.lines.replace("\n", " "))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(shayari.lines))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(openIntent)
+            .build()
+
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_SHAYARI_ID, notification)
+    }
+
+    @Synchronized
     fun startRingtoneAndVibrate(context: Context) {
         try {
-            stopRingtoneAndVibrate(context)
+            stopRingtoneAndVibrateOnly(context)
             val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             activeRingtone = RingtoneManager.getRingtone(context.applicationContext, uri)?.apply {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -286,7 +347,15 @@ object NotificationHelper {
         }
     }
 
+    @Synchronized
     fun stopRingtoneAndVibrate(context: Context) {
+        activeIncomingCallId = null
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager?.cancel(NOTIFICATION_CALL_ID)
+        stopRingtoneAndVibrateOnly(context)
+    }
+
+    private fun stopRingtoneAndVibrateOnly(context: Context) {
         stopOutgoingRingback()
         runCatching { activeRingtone?.stop() }
         activeRingtone = null
@@ -298,10 +367,9 @@ object NotificationHelper {
                 (context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator)?.cancel()
             }
         }
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.cancel(NOTIFICATION_CALL_ID)
     }
 
+    @Synchronized
     fun startOutgoingRingback() {
         runCatching {
             stopOutgoingRingback()
@@ -311,6 +379,7 @@ object NotificationHelper {
         }
     }
 
+    @Synchronized
     fun stopOutgoingRingback() {
         runCatching {
             outgoingToneGenerator?.stopTone()

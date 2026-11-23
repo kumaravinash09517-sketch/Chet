@@ -23,18 +23,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.DoneAll
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -78,9 +81,12 @@ import com.example.core.security.UserSession
 import com.example.data.local.ConversationEntity
 import com.example.data.local.MessageStatus
 import com.example.data.local.UserEntity
+import com.example.platform.DailyShayari
 import com.example.platform.DeviceContact
+import com.example.platform.ShayariManager
 import com.example.ui.theme.OnlineGreen
-import com.example.ui.theme.ReadCheckEmerald
+import com.example.ui.theme.ReadCheckBlue
+import com.example.ui.theme.ReadCheckBlueOnBubble
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,6 +105,8 @@ fun HomeScreen(
     isSearchingUsers: Boolean = false,
     serverStatus: ServerStatus,
     wsConnected: Boolean,
+    currentShayari: DailyShayari = ShayariManager.shayariCollection.first(),
+    onNextShayari: () -> Unit = {},
     hasContactPermission: () -> Boolean,
     onSearchQueryChange: (String) -> Unit,
     onRefreshDirectory: () -> Unit,
@@ -107,6 +115,7 @@ fun HomeScreen(
     onOpenProfileSettings: () -> Unit
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var shayariExpanded by rememberSaveable { mutableStateOf(true) }
     var showContactSheet by remember { mutableStateOf(false) }
     var showContactRationale by remember { mutableStateOf(false) }
 
@@ -252,17 +261,11 @@ fun HomeScreen(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
                     icon = {
-                        BadgedBox(
-                            badge = {
-                                if (totalUnreadCount > 0) {
-                                    Badge { Text(totalUnreadCount.toString()) }
-                                }
-                            }
-                        ) {
-                            Icon(Icons.Rounded.Chat, contentDescription = "Chats")
-                        }
+                        Icon(Icons.Rounded.Chat, contentDescription = "Chats")
                     },
-                    label = { Text("Chats") },
+                    label = {
+                        Text(if (totalUnreadCount > 0) "Chats ($totalUnreadCount)" else "Chats")
+                    },
                     modifier = Modifier.testTag("tab_chats")
                 )
                 NavigationBarItem(
@@ -340,11 +343,19 @@ fun HomeScreen(
             )
 
             if (selectedTab == 0) {
+                if (searchQuery.isBlank()) {
+                    DailyShayariCard(
+                        shayari = currentShayari,
+                        expanded = shayariExpanded,
+                        onToggleExpand = { shayariExpanded = !shayariExpanded },
+                        onNextShayari = onNextShayari
+                    )
+                }
                 if (filteredConversations.isEmpty() && peopleSearchMatches.isEmpty()) {
                     EmptyHomeState(
                         title = if (searchQuery.isBlank()) "No conversations yet" else "No matching chats or users",
                         subtitle = if (searchQuery.isBlank()) {
-                            "Search by phone number or name above, open Directory, or tap the Contact Picker."
+                            "Search by name, user ID, or phone above, open Directory, or tap the Contact Picker."
                         } else {
                             "Try another phone number, name, or user ID."
                         }
@@ -820,7 +831,93 @@ private fun EmptyHomeState(title: String, subtitle: String) {
 }
 
 @Composable
-fun MessageStatusIcon(status: MessageStatus, tintOverride: androidx.compose.ui.graphics.Color? = null) {
+private fun DailyShayariCard(
+    shayari: DailyShayari,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onNextShayari: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag("daily_shayari_card")
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onToggleExpand)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "आज की शायरी • ${shayari.mood}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onNextShayari,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "Next Shayari",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = onToggleExpand,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                            contentDescription = if (expanded) "Collapse Shayari" else "Expand Shayari",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+            if (expanded) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = shayari.lines,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageStatusIcon(
+    status: MessageStatus,
+    tintOverride: androidx.compose.ui.graphics.Color? = null,
+    isOnDarkBubble: Boolean = false
+) {
     when (status) {
         MessageStatus.PENDING -> Icon(
             imageVector = Icons.Rounded.Schedule,
@@ -843,7 +940,7 @@ fun MessageStatusIcon(status: MessageStatus, tintOverride: androidx.compose.ui.g
         MessageStatus.READ -> Icon(
             imageVector = Icons.Rounded.DoneAll,
             contentDescription = "Read",
-            tint = ReadCheckEmerald,
+            tint = if (isOnDarkBubble) ReadCheckBlueOnBubble else ReadCheckBlue,
             modifier = Modifier.size(16.dp)
         )
     }

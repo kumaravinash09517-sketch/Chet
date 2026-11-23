@@ -22,6 +22,7 @@ class SignalingForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.createChannels(this)
+        ShayariManager.scheduleDailyMorningNotification(this)
         startForeground(
             NotificationHelper.NOTIFICATION_SYNC_ID,
             NotificationHelper.buildSyncServiceNotification(this)
@@ -35,7 +36,7 @@ class SignalingForegroundService : Service() {
                 val myId = app.sessionManager.getCurrentSession()?.userId ?: return@collect
                 when (event) {
                     is SignalingEvent.IncomingCallOffer -> {
-                        if (!app.isUiInForeground && !app.chatRepository.isCallDismissed(event.callId)) {
+                        if (!app.isUiInForeground && !app.chatRepository.isCallHandled(event.callId)) {
                             val callerUser = app.database.userDao().getUser(event.callerId)
                             val resolvedCallerName = if (event.callerName.isBlank() || event.callerName == event.callerId) {
                                 callerUser?.displayName ?: event.callerId
